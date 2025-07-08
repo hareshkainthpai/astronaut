@@ -1,0 +1,10 @@
+/models/BioMistral-7B/
+/models/Mistral-7B-Instruct-v0.3/
+/.venv/
+# Large model files
+*.bin
+*.safetensors
+*.pth
+*.model
+*.ckpt
+models/
