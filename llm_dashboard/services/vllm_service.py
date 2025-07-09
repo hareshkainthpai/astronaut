@@ -1,473 +1,497 @@
-import os
-import sys
 import subprocess
-import logging
-import threading
 import time
-import requests
-import psutil
+import os
 import signal
-from typing import Dict, Optional, Any
-from django.utils import timezone
-from ..models import LLMModel
+import psutil
+import requests
+import json
+from typing import Dict, Any, Optional
+from channels.layers import get_channel_layer
+from asgiref.sync import async_to_sync
+
+from .vector_service.token_aware_vector import TokenAwareVectorService
+from ..models import LLMModel, LLMRequest, Document
+from .map_reduce_service import MapReduceService
+import logging
 
 logger = logging.getLogger(__name__)
 
-
 class VLLMService:
-    """Simplified vLLM service with enhanced CUDA stability"""
-
     def __init__(self):
-        self.processes: Dict[int, subprocess.Popen] = {}
+        self.processes = {}  # Store process info for each model
+        self.channel_layer = get_channel_layer()
 
-    def _append_log(self, model: LLMModel, message: str, level: str = "INFO"):
+    def _append_log(self, model: LLMModel, message: str):
         """Append log message to model's loading logs"""
-        timestamp = timezone.now().strftime("%Y-%m-%d %H:%M:%S")
-        log_entry = f"[{timestamp}] [{level}] {message}\n"
-
-        # Refresh model from database to avoid conflicts
-        model.refresh_from_db()
-
-        if model.loading_logs:
-            model.loading_logs += log_entry
-        else:
-            model.loading_logs = log_entry
-
-        # Keep logs under reasonable size (last 50KB)
-        if len(model.loading_logs) > 50000:
-            lines = model.loading_logs.split('\n')
-            model.loading_logs = '\n'.join(lines[-500:])  # Keep last 500 lines
-
-        model.save(update_fields=['loading_logs'])
-        logger.info(f"Model {model.name}: {message}")
-
-    def _check_cuda_environment(self, model: LLMModel) -> bool:
-        """Check CUDA environment and provide diagnostics"""
         try:
-            self._append_log(model, "Checking CUDA environment...")
-
-            # Check if CUDA is available
-            import torch
-            if not torch.cuda.is_available():
-                self._append_log(model, "CUDA is not available in PyTorch", "ERROR")
-                return False
-
-            gpu_count = torch.cuda.device_count()
-            self._append_log(model, f"CUDA available with {gpu_count} GPU(s)")
-
-            if model.tensor_parallel_size > gpu_count:
-                self._append_log(model, f"Requested {model.tensor_parallel_size} GPUs but only {gpu_count} available",
-                                 "ERROR")
-                return False
-
-            # Check individual GPU properties
-            for i in range(min(model.tensor_parallel_size, gpu_count)):
-                try:
-                    props = torch.cuda.get_device_properties(i)
-                    memory_gb = props.total_memory / (1024 ** 3)
-                    self._append_log(model, f"GPU {i}: {props.name} ({memory_gb:.1f}GB)")
-                except Exception as e:
-                    self._append_log(model, f"Error checking GPU {i}: {str(e)}", "WARNING")
-
-            return True
-
+            timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+            log_entry = f"[{timestamp}] {message}\n"
+            
+            # Update model logs
+            if model.loading_logs:
+                model.loading_logs += log_entry
+            else:
+                model.loading_logs = log_entry
+            
+            # Keep only last 10000 characters to prevent unbounded growth
+            if len(model.loading_logs) > 10000:
+                model.loading_logs = model.loading_logs[-10000:]
+            
+            model.save(update_fields=['loading_logs'])
+            
+            # Send real-time update via WebSocket
+            if self.channel_layer:
+                group_name = f"model_loading_{model.id}"
+                async_to_sync(self.channel_layer.group_send)(group_name, {
+                    "type": "loading_update",
+                    "message": message
+                })
+                
         except Exception as e:
-            self._append_log(model, f"CUDA environment check failed: {str(e)}", "ERROR")
+            logger.error(f"Error appending log: {e}")
+
+    def _check_cuda_environment(self, model: LLMModel):
+        """Check and configure CUDA environment"""
+        self._append_log(model, "🔧 Checking CUDA environment...")
+        
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            gpu_count = pynvml.nvmlDeviceGetCount()
+            self._append_log(model, f"✅ Found {gpu_count} CUDA devices")
+            
+            # Set CUDA environment variables for stability
+            cuda_env = {
+                'CUDA_VISIBLE_DEVICES': ','.join(str(i) for i in range(min(gpu_count, model.tensor_parallel_size))),
+                'TORCH_NCCL_ASYNC_ERROR_HANDLING': '1',
+                'VLLM_ATTENTION_BACKEND': 'FLASHINFER',
+                'PYTORCH_CUDA_ALLOC_CONF': 'max_split_size_mb:128',
+                'TOKENIZERS_PARALLELISM': 'false',
+                'CUDA_LAUNCH_BLOCKING': '0'
+            }
+            
+            for key, value in cuda_env.items():
+                os.environ[key] = value
+                self._append_log(model, f"   {key}={value}")
+            
+            return True
+            
+        except Exception as e:
+            self._append_log(model, f"❌ CUDA environment check failed: {e}")
             return False
 
-    def start_vllm_server(self, model: LLMModel) -> bool:
-        """Start vLLM server with enhanced CUDA stability"""
+    def start_vllm_server(self, model: LLMModel):
+        """Start vLLM server for the given model"""
         try:
-            self._append_log(model, f"Starting vLLM server for model: {model.name}")
-
-            # Check CUDA environment first
+            self._append_log(model, f"🚀 Starting vLLM server for {model.name}")
+            
+            # Check if already running
+            if self.is_server_running(model):
+                self._append_log(model, "⚠️ Server already running")
+                return True
+            
+            # Update model status
+            model.status = 'LOADING'
+            model.save()
+            
+            # Check CUDA environment
             if not self._check_cuda_environment(model):
-                self._append_log(model, "CUDA environment check failed", "ERROR")
                 model.status = 'ERROR'
-                model.save(update_fields=['status'])
+                model.save()
                 return False
-
-            # Validate model path
-            model_path = model.model_path.strip()
-            if not model_path:
-                raise ValueError(f"Model {model.name} has no valid model_path")
-
-            self._append_log(model, f"Model path: {model_path}")
-
-            # Check if path exists (for local models)
-            if os.path.exists(model_path):
-                if os.path.isdir(model_path):
-                    self._append_log(model, f"Local model directory found: {model_path}")
-                else:
-                    self._append_log(model, f"Model path exists but is not a directory: {model_path}", "WARNING")
-            else:
-                self._append_log(model, f"Assuming Hugging Face model ID: {model_path}")
-
-            # Choose the appropriate backend and configuration
-            if model.tensor_parallel_size > 1:
-                # Multi-GPU setup - use ray backend which is more stable
-                cmd = [
-                    sys.executable, "-m", "vllm.entrypoints.openai.api_server",
-                    "--model", model_path,
-                    "--host", "0.0.0.0",
-                    "--port", str(model.vllm_port),
-                    "--tensor-parallel-size", str(model.tensor_parallel_size),
-                    "--gpu-memory-utilization", str(model.gpu_memory_utilization),
-                    "--max-model-len", str(model.max_tokens),
-                    "--dtype", getattr(model, 'dtype', 'auto'),
-                    "--served-model-name", model.name,
-                    "--trust-remote-code",
-                    "--disable-log-requests",
-                    "--disable-log-stats",
-                    "--enforce-eager",  # Disable CUDA graphs
-                    "--distributed-executor-backend", "mp",
-                    "--disable-custom-all-reduce",  # Disable custom all-reduce
-                ]
-                self._append_log(model, "Using Ray backend for multi-GPU setup")
-            else:
-                # Single GPU setup - simpler configuration
-                cmd = [
-                    sys.executable, "-m", "vllm.entrypoints.openai.api_server",
-                    "--model", model_path,
-                    "--host", "0.0.0.0",
-                    "--port", str(model.vllm_port),
-                    "--gpu-memory-utilization", str(model.gpu_memory_utilization),
-                    "--max-model-len", str(model.max_tokens),
-                    "--dtype", getattr(model, 'dtype', 'auto'),
-                    "--served-model-name", model.name,
-                    "--trust-remote-code",
-                    "--disable-log-requests",
-                    "--disable-log-stats",
-                    "--enforce-eager",  # Disable CUDA graphs
-                ]
-                self._append_log(model, "Using single GPU configuration")
-
-            self._append_log(model, f"Command: {' '.join(cmd)}")
-
-            # Set up environment with comprehensive CUDA fixes
-            env = os.environ.copy()
-
-            # Core CUDA environment variables
-            if model.tensor_parallel_size > 1:
-                # Multi-GPU: explicitly set visible devices
-                gpu_ids = ','.join(str(i) for i in range(model.tensor_parallel_size))
-                env['CUDA_VISIBLE_DEVICES'] = gpu_ids
-                self._append_log(model, f"Multi-GPU: CUDA_VISIBLE_DEVICES={gpu_ids}")
-            else:
-                # Single GPU: use first available GPU only
-                env['CUDA_VISIBLE_DEVICES'] = '0'
-                self._append_log(model, "Single GPU: CUDA_VISIBLE_DEVICES=0")
-
-            # Ray configuration for multi-GPU
-            if model.tensor_parallel_size > 1:
-                env['RAY_DEDUP_LOGS'] = '0'
-                env['RAY_DISABLE_IMPORT_WARNING'] = '1'
-                env['RAY_OBJECT_STORE_ALLOW_SLOW_STORAGE'] = '1'
-
-            # PyTorch and CUDA optimization
-            env['TORCH_NCCL_ASYNC_ERROR_HANDLING'] = '1'
-            env['NCCL_TIMEOUT'] = '1800'
-            env['NCCL_IB_DISABLE'] = '1'  # Disable InfiniBand
-            env['NCCL_P2P_DISABLE'] = '1'  # Disable P2P
-            env['CUDA_LAUNCH_BLOCKING'] = '0'  # Don't block CUDA launches
-
-            # vLLM specific optimizations
-            env['VLLM_USE_MODELSCOPE'] = 'False'
-            env['VLLM_ATTENTION_BACKEND'] = 'FLASH_ATTN'
-            env['VLLM_USE_TRITON_FLASH_ATTN'] = 'False'
-            env['VLLM_ALLOW_LONG_MAX_MODEL_LEN'] = 'True'
-            env['VLLM_DISABLE_ASYNC_OUTPUT_PROC'] = 'True'
-
-            # Memory management
-            env['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
-            env['OMP_NUM_THREADS'] = '1'  # Prevent CPU oversubscription
-
-            self._append_log(model, "Environment configured with CUDA stability fixes")
-
-            # Start the process with a clean environment
+            
+            # Force cleanup before starting
+            self._append_log(model, "🧹 Cleaning up GPU memory...")
+            self._force_gpu_memory_cleanup()
+            
+            # Build vLLM command
+            cmd = [
+                'python', '-m', 'vllm.entrypoints.openai.api_server',
+                '--model', model.model_path,
+                '--host', '0.0.0.0',
+                '--port', str(model.vllm_port),
+                '--tensor-parallel-size', str(model.tensor_parallel_size),
+                '--gpu-memory-utilization', str(model.gpu_memory_utilization),
+                '--max-model-len', str(model.max_tokens),
+                '--dtype', model.dtype,
+                '--disable-log-requests',
+                '--enforce-eager'
+            ]
+            
+            self._append_log(model, f"📋 Command: {' '.join(cmd)}")
+            
+            # Start process
+            self._append_log(model, "⏳ Starting vLLM process...")
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
-                universal_newlines=True,
-                env=env,
-                preexec_fn=os.setsid,  # Create new process group
-                cwd=os.path.expanduser("~")  # Start in home directory
+                universal_newlines=True
             )
-
-            self.processes[model.id] = process
+            
+            # Store process info
+            self.processes[model.id] = {
+                'process': process,
+                'start_time': time.time(),
+                'port': model.vllm_port
+            }
+            
+            # Update model with process PID
             model.loading_pid = process.pid
-            model.save(update_fields=['loading_pid'])
-
-            self._append_log(model, f"vLLM process started with PID: {process.pid}")
-
-            # Start output monitoring
-            def monitor_output():
-                try:
-                    server_ready_detected = False
-                    startup_timeout = 600  # 10 minutes for large models
-                    start_time = time.time()
-
-                    for line in iter(process.stdout.readline, ''):
-                        if line:
-                            line = line.strip()
-
-                            # Log all important information
-                            if any(keyword in line.lower() for keyword in [
-                                'error', 'warning', 'loaded', 'serving', 'started',
-                                'model', 'gpu', 'memory', 'ready', 'application startup complete',
-                                'uvicorn running', 'cuda', 'runtime', 'ray', 'worker'
-                            ]):
-                                self._append_log(model, f"vLLM: {line}")
-
-                            # Check for successful startup
-                            if not server_ready_detected and (
-                                    "Application startup complete" in line or
-                                    "Uvicorn running" in line or
-                                    "started server process" in line.lower()
-                            ):
-                                server_ready_detected = True
-                                # Start server readiness check
-                                ready_thread = threading.Thread(
-                                    target=lambda: self._wait_for_server_ready(model),
-                                    daemon=True
-                                )
-                                ready_thread.start()
-
-                            # Check for startup timeout
-                            if time.time() - start_time > startup_timeout:
-                                self._append_log(model, f"Startup timeout after {startup_timeout}s", "ERROR")
-                                break
-
-                    # Process completed
-                    return_code = process.wait()
-
-                    if return_code != 0:
-                        model.refresh_from_db()
-                        if model.status != 'UNLOADED':
-                            model.status = 'ERROR'
-                            self._append_log(model, f"vLLM process exited with code: {return_code}", "ERROR")
-                            model.save(update_fields=['status'])
-
-                except Exception as e:
-                    self._append_log(model, f"Output monitoring error: {str(e)}", "ERROR")
-                finally:
-                    if model.id in self.processes:
-                        del self.processes[model.id]
-
-            monitor_thread = threading.Thread(target=monitor_output, daemon=True)
-            monitor_thread.start()
-
-            return True
-
+            model.save()
+            
+            self._append_log(model, f"🔄 Process started with PID: {process.pid}")
+            
+            # Monitor process output in background
+            self._monitor_process_output(model, process)
+            
+            # Wait for server to be ready
+            if self._wait_for_server_ready(model):
+                model.status = 'LOADED'
+                model.save()
+                self._append_log(model, "✅ Server is ready and responding!")
+                return True
+            else:
+                model.status = 'ERROR'
+                model.save()
+                return False
+                
         except Exception as e:
-            self._append_log(model, f"Failed to start vLLM server: {str(e)}", "ERROR")
+            self._append_log(model, f"❌ Error starting server: {e}")
             model.status = 'ERROR'
-            model.save(update_fields=['status'])
+            model.save()
             return False
 
-    def _wait_for_server_ready(self, model: LLMModel, timeout: int = 600):
-        """Wait for the vLLM server to be ready"""
-        self._append_log(model, "Waiting for vLLM server to be ready...")
+    def _monitor_process_output(self, model: LLMModel, process):
+        """Monitor process output and log it"""
+        try:
+            while True:
+                output = process.stdout.readline()
+                if output == '' and process.poll() is not None:
+                    break
+                if output:
+                    self._append_log(model, output.strip())
+                    
+        except Exception as e:
+            self._append_log(model, f"Error monitoring process: {e}")
 
+    def _wait_for_server_ready(self, model: LLMModel, timeout: int = 300):
+        """Wait for vLLM server to be ready"""
+        self._append_log(model, "⏳ Waiting for server to be ready...")
+        
         start_time = time.time()
         while time.time() - start_time < timeout:
             try:
-                response = requests.get(
-                    f"http://localhost:{model.vllm_port}/health",
-                    timeout=5
-                )
+                response = requests.get(f'http://localhost:{model.vllm_port}/health', timeout=5)
                 if response.status_code == 200:
-                    self._append_log(model, "vLLM server is ready and accepting requests!", "SUCCESS")
-                    model.status = 'LOADED'
-                    model.loaded_at = timezone.now()
-                    model.save(update_fields=['status', 'loaded_at'])
                     return True
-
-            except requests.exceptions.RequestException:
+            except:
                 pass
-
-            time.sleep(5)  # Check every 5 seconds
-
-        # Timeout
-        self._append_log(model, f"Server readiness timeout after {timeout}s", "ERROR")
-        model.status = 'ERROR'
-        model.save(update_fields=['status'])
+            
+            time.sleep(5)
+            elapsed = int(time.time() - start_time)
+            self._append_log(model, f"⏳ Still waiting... ({elapsed}s elapsed)")
+        
+        self._append_log(model, "❌ Server did not become ready within timeout")
         return False
 
-    def stop_vllm_server(self, model: LLMModel) -> bool:
-        """Stop vLLM server for a model and free GPU memory"""
+    def stop_vllm_server(self, model: LLMModel):
+        """Stop vLLM server for the given model"""
         try:
-            self._append_log(model, "Stopping vLLM server...")
-
-            if model.id in self.processes:
-                process = self.processes[model.id]
-
+            self._append_log(model, f"🛑 Stopping vLLM server for {model.name}")
+            
+            # Get process info
+            process_info = self.processes.get(model.id)
+            if process_info:
+                process = process_info['process']
+                
+                # Try graceful shutdown first
+                self._append_log(model, "🔄 Attempting graceful shutdown...")
+                process.terminate()
+                
+                # Wait for graceful shutdown
                 try:
-                    # Kill entire process group
-                    os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-                    self._append_log(model, f"Sent termination signal to process group {process.pid}")
-
-                    # Wait for graceful termination
-                    try:
-                        process.wait(timeout=20)
-                        self._append_log(model, "vLLM server terminated gracefully")
-                    except subprocess.TimeoutExpired:
-                        # Force kill
-                        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                        self._append_log(model, "vLLM server force killed", "WARNING")
-
-                        # Extra cleanup for Ray processes
-                        try:
-                            subprocess.run(["ray", "stop", "--force"],
-                                           timeout=10, capture_output=True)
-                            self._append_log(model, "Ray processes cleaned up")
-                        except:
-                            pass
-
-                except (ProcessLookupError, OSError):
-                    self._append_log(model, "vLLM server process was already terminated")
-
+                    process.wait(timeout=30)
+                    self._append_log(model, "✅ Process terminated gracefully")
+                except subprocess.TimeoutExpired:
+                    self._append_log(model, "⚠️ Graceful shutdown timed out, forcing...")
+                    process.kill()
+                    process.wait()
+                    self._append_log(model, "✅ Process killed")
+                
+                # Clean up
                 del self.processes[model.id]
-
-            # Force GPU memory cleanup
-            self._force_gpu_memory_cleanup(model)
-
+            
+            # Force cleanup any remaining processes
+            self._force_gpu_memory_cleanup()
+            
+            # Update model status
             model.status = 'UNLOADED'
             model.loading_pid = None
-            model.save(update_fields=['status', 'loading_pid'])
-            self._append_log(model, "vLLM server stopped successfully", "SUCCESS")
+            model.save()
+            
+            self._append_log(model, "✅ Server stopped successfully")
             return True
-
+            
         except Exception as e:
-            logger.error(f"Failed to stop vLLM server for model {model.name}: {str(e)}")
-            self._append_log(model, f"Error stopping vLLM server: {str(e)}", "ERROR")
+            self._append_log(model, f"❌ Error stopping server: {e}")
             return False
 
-    def _force_gpu_memory_cleanup(self, model: LLMModel):
-        """Force GPU memory cleanup after stopping vLLM server"""
+    def _force_gpu_memory_cleanup(self):
+        """Force cleanup of GPU memory and processes"""
         try:
-            self._append_log(model, "Forcing GPU memory cleanup...")
-
-            # Clear PyTorch cache
+            # Kill any vLLM processes
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                try:
+                    if proc.info['cmdline'] and any('vllm' in arg for arg in proc.info['cmdline']):
+                        proc.terminate()
+                        proc.wait(timeout=5)
+                except:
+                    pass
+            
+            # Force GPU memory cleanup
             try:
                 import torch
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                     torch.cuda.synchronize()
-                    self._append_log(model, "PyTorch GPU cache cleared")
-            except ImportError:
+            except:
                 pass
-
-            # Kill any remaining CUDA processes
-            try:
-                # Find and kill any remaining processes using GPU
-                import subprocess
-                result = subprocess.run(['nvidia-smi', '--query-compute-apps=pid', '--format=csv,noheader,nounits'],
-                                        capture_output=True, text=True, timeout=10)
-
-                if result.returncode == 0 and result.stdout.strip():
-                    gpu_pids = [int(pid.strip()) for pid in result.stdout.strip().split('\n') if pid.strip()]
-
-                    for pid in gpu_pids:
-                        try:
-                            # Check if this PID belongs to our model process or its children
-                            proc = psutil.Process(pid)
-                            if 'python' in proc.name().lower() and ('vllm' in ' '.join(proc.cmdline()).lower() or
-                                                                    str(model.vllm_port) in ' '.join(proc.cmdline())):
-                                proc.terminate()
-                                self._append_log(model, f"Terminated GPU process PID {pid}")
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            pass
-
-            except (subprocess.TimeoutExpired, FileNotFoundError):
-                self._append_log(model, "nvidia-smi not available for GPU cleanup")
-
-            # Additional cleanup for multi-GPU setups
-            if hasattr(model, 'tensor_parallel_size') and model.tensor_parallel_size > 1:
-                try:
-                    # Stop Ray if it was used for distributed inference
-                    subprocess.run(["ray", "stop", "--force"], timeout=10, capture_output=True)
-                    self._append_log(model, "Ray cluster stopped for multi-GPU cleanup")
-                except:
-                    pass
-
-            # Force garbage collection
-            import gc
-            gc.collect()
-
-            self._append_log(model, "GPU memory cleanup completed")
-
+                
         except Exception as e:
-            self._append_log(model, f"GPU memory cleanup failed: {str(e)}", "WARNING")
+            logger.error(f"Error in force cleanup: {e}")
 
-    def stop_loading(self, model: LLMModel) -> bool:
-        """Stop loading a model"""
-        return self.stop_vllm_server(model)
+    def stop_loading(self, model: LLMModel):
+        """Stop loading process"""
+        try:
+            if model.loading_pid:
+                os.kill(model.loading_pid, signal.SIGTERM)
+        except:
+            pass
 
     def is_server_running(self, model: LLMModel) -> bool:
-        """Check if the vLLM server is running and responding"""
+        """Check if vLLM server is running and responding"""
         try:
-            if model.id not in self.processes:
-                return False
-
-            process = self.processes[model.id]
-            if process.poll() is not None:
-                return False
-
-            response = requests.get(
-                f"http://localhost:{model.vllm_port}/health",
-                timeout=3
-            )
+            response = requests.get(f'http://localhost:{model.vllm_port}/health', timeout=5)
             return response.status_code == 200
-
-        except Exception:
+        except:
             return False
 
-    def generate_text(self, model: LLMModel, prompt: str, max_tokens: int = 512,
-                      temperature: float = 0.7, top_p: float = 0.9) -> Dict[str, Any]:
-        """Generate text using the vLLM OpenAI-compatible API"""
+    def generate_text(self, model: LLMModel, prompt: str, max_tokens: int = 100, 
+                     temperature: float = 0.7, top_p: float = 0.9) -> Dict:
+        """Generate text using the loaded model"""
         try:
+            if not self.is_server_running(model):
+                raise Exception("Model server is not running")
+            
+            start_time = time.time()
+            
+            # Prepare request
+            data = {
+                "model": model.model_path,
+                "prompt": prompt,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "top_p": top_p,
+                "stop": None
+            }
+            
+            # Make request
             response = requests.post(
-                f"http://localhost:{model.vllm_port}/v1/completions",
-                json={
-                    "model": model.name,
-                    "prompt": prompt,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                    "top_p": top_p,
-                    "stream": False
-                },
-                timeout=60
+                f'http://localhost:{model.vllm_port}/v1/completions',
+                json=data,
+                timeout=120
             )
-
-            if response.status_code == 200:
-                return response.json()
-            else:
-                raise Exception(f"API request failed with status {response.status_code}: {response.text}")
-
+            
+            if response.status_code != 200:
+                raise Exception(f"API request failed: {response.text}")
+            
+            result = response.json()
+            duration = time.time() - start_time
+            
+            # Extract response
+            generated_text = result['choices'][0]['text']
+            tokens_generated = result['usage']['completion_tokens']
+            tokens_prompt = result['usage']['prompt_tokens']
+            
+            return {
+                'response': generated_text,
+                'tokens_generated': tokens_generated,
+                'tokens_prompt': tokens_prompt,
+                'duration': duration
+            }
+            
         except Exception as e:
-            logger.error(f"Text generation failed: {str(e)}")
-            raise e
+            logger.error(f"Error generating text: {e}")
+            raise
 
-    def get_model_info(self, model: LLMModel) -> Dict[str, Any]:
-        """Get model information from the vLLM server"""
+    def generate_text_with_smart_rag(self, model: LLMModel, prompt: str, 
+                                   document_id: str, max_tokens: int = 100,
+                                   temperature: float = 0.7, top_p: float = 0.9,
+                                   strategy: str = None) -> Dict:
+        """Generate text using smart RAG with token management"""
+        
+        # Determine strategy
+        if strategy is None:
+            strategy = model.rag_strategy
+        
+        # Create request record
+        request = LLMRequest.objects.create(
+            model=model,
+            prompt=prompt,
+            document_id=document_id,
+            rag_enabled=True,
+            strategy_used=strategy,
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=max_tokens
+        )
+        
         try:
-            response = requests.get(
-                f"http://localhost:{model.vllm_port}/v1/models",
-                timeout=10
+            # Calculate available tokens for context
+            prompt_tokens = len(model.get_tokenizer().encode(prompt))
+            available_context_tokens = (
+                model.get_available_context_tokens() - 
+                prompt_tokens - 
+                max_tokens - 
+                100  # Buffer for formatting
             )
-
-            if response.status_code == 200:
-                return response.json()
+            
+            if available_context_tokens < 100:
+                raise ValueError("Not enough context tokens available")
+            
+            # Get context based on strategy
+            if strategy == 'map_reduce':
+                context_result = self._process_map_reduce_rag(
+                    model, document_id, prompt, available_context_tokens
+                )
             else:
-                return {"error": f"Failed to get model info: {response.status_code}"}
-
+                context_result = self._process_standard_rag(
+                    model, document_id, prompt, available_context_tokens, strategy
+                )
+            
+            # Generate response
+            if strategy == 'map_reduce' and context_result.get('reduce_result', {}).get('final_answer'):
+                # For map-reduce, we already have the answer
+                generation_result = {
+                    'response': context_result['reduce_result']['final_answer'],
+                    'tokens_generated': context_result['reduce_result'].get('tokens_used', 0),
+                    'duration': 0  # Would need timing
+                }
+            else:
+                # Standard generation with context
+                enhanced_prompt = self._build_enhanced_prompt(prompt, context_result)
+                generation_result = self.generate_text(
+                    model=model,
+                    prompt=enhanced_prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    top_p=top_p
+                )
+            
+            # Update request record
+            request.response = generation_result.get('response', '')
+            request.duration = generation_result.get('duration', 0)
+            request.tokens_generated = generation_result.get('tokens_generated', 0)
+            request.total_context_tokens = context_result.get('total_tokens', 0)
+            request.chunks_processed = context_result.get('chunks_used', 0)
+            request.status = 'COMPLETED'
+            
+            if strategy == 'map_reduce':
+                request.map_reduce_steps = context_result.get('map_results', [])
+            
+            request.save()
+            
+            # Build complete result
+            result = {
+                'response': generation_result.get('response', ''),
+                'strategy_used': strategy,
+                'context_info': context_result,
+                'tokens_generated': generation_result.get('tokens_generated', 0),
+                'total_context_tokens': context_result.get('total_tokens', 0),
+                'request_id': request.id
+            }
+            
+            return result
+            
         except Exception as e:
-            return {"error": str(e)}
+            request.status = 'ERROR'
+            request.error_message = str(e)
+            request.save()
+            raise
+    
+    def _process_standard_rag(self, model: LLMModel, document_id: str, 
+                            query: str, max_tokens: int, strategy: str) -> Dict:
+        """Process standard RAG (sliding window, hybrid, direct)"""
+        
+        vector_service = TokenAwareVectorService(model)
+        
+        return vector_service.get_chunks_within_token_limit(
+            document_id=document_id,
+            query=query,
+            max_tokens=max_tokens,
+            strategy=strategy
+        )
+    
+    def _process_map_reduce_rag(self, model: LLMModel, document_id: str, 
+                              query: str, max_tokens: int) -> Dict:
+        """Process map-reduce RAG"""
+        
+        map_reduce_service = MapReduceService(model, self)
+        
+        return map_reduce_service.process_document_with_map_reduce(
+            document_id=document_id,
+            query=query,
+            max_tokens=max_tokens
+        )
+    
+    def _build_enhanced_prompt(self, original_prompt: str, context_result: Dict) -> str:
+        """Build enhanced prompt with context"""
+        
+        if context_result.get('strategy') == 'map_reduce':
+            # For map-reduce, use summaries
+            summaries = context_result.get('map_results', [])
+            if summaries:
+                context_text = "\n\n".join([
+                    f"Summary {i+1}: {summary['summary']}"
+                    for i, summary in enumerate(summaries)
+                    if summary.get('summary')
+                ])
+            else:
+                context_text = "No relevant context found."
+        else:
+            # For other strategies, use chunks
+            chunks = context_result.get('chunks', [])
+            if chunks:
+                context_text = "\n\n".join([
+                    f"Context {i+1}: {chunk['content']}"
+                    for i, chunk in enumerate(chunks)
+                ])
+            else:
+                context_text = "No relevant context found."
+        
+        return f"""Based on the following context information, please answer the question:
 
+Context Information:
+{context_text}
 
-# Global service instance
+Question: {original_prompt}
+
+Please provide a comprehensive answer based on the context provided above."""
+
+    def get_model_info(self, model: LLMModel) -> Dict:
+        """Get model information"""
+        try:
+            if not self.is_server_running(model):
+                return {'error': 'Model server not running'}
+            
+            response = requests.get(f'http://localhost:{model.vllm_port}/v1/models')
+            return response.json()
+            
+        except Exception as e:
+            return {'error': str(e)}
+
+# Global instance
 vllm_service = VLLMService()

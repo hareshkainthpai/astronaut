@@ -3,7 +3,8 @@ from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
-from .models import LLMModel, LLMRequest
+from .models import LLMModel, LLMRequest, Document
+from .services.vector_service.token_aware_vector import TokenAwareVectorService
 from .services.vllm_service import vllm_service
 from django.utils import timezone
 from datetime import timedelta
@@ -721,3 +722,119 @@ def model_stats(request):
         'tensor_parallel_size': model.tensor_parallel_size,
         'model_size_gb': model.get_model_size_gb()
     })
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def generate_with_document_rag(request, model_id):
+    """Generate text using RAG with a specific document ID"""
+    try:
+        model = get_object_or_404(LLMModel, id=model_id)
+        data = json.loads(request.body)
+
+        document_id = data.get('document_id')
+        if not document_id:
+            return JsonResponse({'error': 'document_id is required'}, status=400)
+
+        # Verify document exists
+        document = get_object_or_404(Document, id=document_id, model=model)
+
+        result = vllm_service.generate_text_with_smart_rag(
+            model=model,
+            prompt=data.get('prompt', ''),
+            document_id=document_id,
+            max_tokens=data.get('max_tokens', 100),
+            temperature=data.get('temperature', 0.7),
+            top_p=data.get('top_p', 0.9),
+            strategy=data.get('strategy')
+        )
+
+        return JsonResponse(result)
+
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@require_http_methods(["GET"])
+def list_documents(request, model_id):
+    """List all documents for a model"""
+    model = get_object_or_404(LLMModel, id=model_id)
+    documents = Document.objects.filter(model=model).values(
+        'id', 'title', 'created_at', 'updated_at', 'is_indexed', 'estimated_tokens'
+    )
+
+    return JsonResponse({'documents': list(documents)})
+
+
+@require_http_methods(["GET"])
+def get_document_chunks(request, model_id, document_id):
+    """Get all chunks for a specific document"""
+    model = get_object_or_404(LLMModel, id=model_id)
+    vector_service = TokenAwareVectorService(model)
+
+    chunks = vector_service.get_document_chunks_by_id(document_id)
+
+    return JsonResponse({'chunks': chunks})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def search_document_chunks(request, model_id, document_id):
+    """Search for relevant chunks within a specific document"""
+    try:
+        model = get_object_or_404(LLMModel, id=model_id)
+        data = json.loads(request.body)
+
+        query = data.get('query', '')
+        k = data.get('k', 5)
+
+        vector_service = TokenAwareVectorService(model)
+        chunks = vector_service.search_document_chunks(document_id, query, k)
+
+        return JsonResponse({'chunks': chunks})
+
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def add_document_api(request, model_id):
+    """Add a document via API"""
+    try:
+        model = get_object_or_404(LLMModel, id=model_id)
+        data = json.loads(request.body)
+
+        title = data.get('title', '')
+        content = data.get('content', '')
+
+        if not title or not content:
+            return JsonResponse({'error': 'title and content are required'}, status=400)
+
+        # Create document
+        document = Document.objects.create(
+            model=model,
+            title=title,
+            content=content,
+            metadata=data.get('metadata', {})
+        )
+
+        # Add to vector store
+        vector_service = TokenAwareVectorService(model)
+        success = vector_service.add_document_to_vector_store(
+            document=document,
+            target_chunk_tokens=data.get('chunk_tokens', 300),
+            overlap_tokens=data.get('overlap_tokens', 50)
+        )
+
+        if success:
+            return JsonResponse({
+                'success': True,
+                'document_id': str(document.id),
+                'message': 'Document added successfully'
+            })
+        else:
+            return JsonResponse({'error': 'Failed to add document to vector store'}, status=500)
+
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)

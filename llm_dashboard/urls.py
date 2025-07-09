@@ -17,4 +17,11 @@ urlpatterns = [
     path('api/model/<int:model_id>/logs/', views.get_model_logs, name='get_model_logs'),
     path('api/model/<int:model_id>/clear-logs/', views.clear_model_logs, name='clear_model_logs'),
     path('force-cleanup-gpus/', views.force_cleanup_all_gpus, name='force_cleanup_gpus'),
+
+    # RAG endpoints
+    path('api/models/<int:model_id>/generate-with-document-rag/', views.generate_with_document_rag, name='generate_with_document_rag'),
+    path('api/models/<int:model_id>/documents/', views.list_documents, name='list_documents'),
+    path('api/models/<int:model_id>/documents/add/', views.add_document_api, name='add_document_api'),
+    path('api/models/<int:model_id>/documents/<str:document_id>/chunks/', views.get_document_chunks, name='get_document_chunks'),
+    path('api/models/<int:model_id>/documents/<str:document_id>/search/', views.search_document_chunks, name='search_document_chunks'),
 ]
