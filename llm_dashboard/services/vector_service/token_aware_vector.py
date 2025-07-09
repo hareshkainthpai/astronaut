@@ -68,7 +68,7 @@ class TokenAwareVectorService(DocumentVectorStoreService):
         if strategy == 'sliding_window':
             return self._sliding_window_strategy(document_id, query, max_tokens)
         elif strategy == 'map_reduce':
-            return self._map_reduce_strategy(document_id, query, max_tokens)
+            return self.map_reduce_strategy(document_id, query, max_tokens)
         elif strategy == 'hybrid':
             return self._hybrid_strategy(document_id, query, max_tokens)
         else:
@@ -124,7 +124,7 @@ class TokenAwareVectorService(DocumentVectorStoreService):
             'chunks_truncated': sum(1 for c in selected_chunks if c.get('truncated', False))
         }
 
-    def _map_reduce_strategy(self, document_id: str, query: str, max_tokens: int) -> Dict:
+    def map_reduce_strategy(self, document_id: str, query: str, max_tokens: int) -> Dict:
         """Map-reduce approach - process chunks in batches and summarize"""
 
         # Get all chunks for the document

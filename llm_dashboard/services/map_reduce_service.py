@@ -1,5 +1,4 @@
-from typing import List, Dict, Any
-import json
+from typing import List, Dict
 
 from llm_dashboard.services.vector_service.token_aware_vector import TokenAwareVectorService
 
@@ -18,7 +17,7 @@ class MapReduceService:
             max_tokens = self.model.get_available_context_tokens()
 
         # Get chunks organized in batches
-        batches_info = self.vector_service._map_reduce_strategy(
+        batches_info = self.vector_service.map_reduce_strategy(
             document_id, query, max_tokens
         )
 
