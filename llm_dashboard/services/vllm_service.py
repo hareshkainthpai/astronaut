@@ -318,9 +318,31 @@ class VLLMService:
         """Stop loading process"""
         try:
             if model.loading_pid:
-                os.kill(model.loading_pid, signal.SIGTERM)
-        except:
-            pass
+                import psutil
+                try:
+                    # Use psutil for better process management
+                    process = psutil.Process(model.loading_pid)
+                    process.terminate()
+                    process.wait(timeout=5)  # Wait up to 5 seconds for graceful shutdown
+                except psutil.TimeoutExpired:
+                    process.kill()  # Force kill if it doesn't terminate gracefully
+                except psutil.NoSuchProcess:
+                    pass  # Process already dead
+
+                # Clear the PID
+                model.loading_pid = None
+
+            # Update model status
+            model.status = 'UNLOADED'
+            self._append_log(model, "Loading process stopped by user")
+            model.save()
+
+            return True
+
+        except Exception as e:
+            self._append_log(model, f"Error stopping loading process: {str(e)}")
+            model.save()
+            return False
 
     def is_server_running(self, model: LLMModel) -> bool:
         """Check if vLLM server is running and responding"""
