@@ -3,7 +3,8 @@ from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
-from .models import LLMModel, LLMRequest
+from .models import LLMModel, LLMRequest, Document
+from .services.vector_service.token_aware_vector import TokenAwareVectorService
 from .services.vllm_service import vllm_service
 from django.utils import timezone
 from datetime import timedelta
@@ -164,6 +165,26 @@ def stop_loading(request, model_id):
     except Exception as e:
         return JsonResponse({'success': False, 'error': str(e)}, status=500)
 
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def api_gpu_stats(request):
+    """API endpoint to get GPU statistics"""
+    try:
+        gpu_stats = get_gpu_stats()
+        gpu_count = len([gpu for gpu in gpu_stats if not gpu.get('error')])
+
+        return JsonResponse({
+            'success': True,
+            'gpu_stats': gpu_stats,
+            'gpu_count': gpu_count,
+            'timestamp': timezone.now().isoformat()
+        })
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
 
 
 @csrf_exempt
@@ -326,7 +347,10 @@ class DashboardView(TemplateView):
         # Get the first model (should only be one active model)
         context['model'] = LLMModel.objects.filter(status__in=['LOADING', 'LOADED', 'ERROR']).first()
 
-        context['recent_requests'] = LLMRequest.objects.order_by('-created_at')[:10]
+        # Add recent requests with all needed fields
+        recent_requests = LLMRequest.objects.select_related('model').order_by('-created_at')[:10]
+        context['recent_requests'] = recent_requests
+
         context['available_models'] = get_available_models()
 
         # Get GPU count safely
@@ -721,3 +745,218 @@ def model_stats(request):
         'tensor_parallel_size': model.tensor_parallel_size,
         'model_size_gb': model.get_model_size_gb()
     })
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def generate_with_document_rag(request, model_id):
+    """Generate text using RAG with a specific document ID"""
+    try:
+        model = get_object_or_404(LLMModel, id=model_id)
+        data = json.loads(request.body)
+
+        document_id = data.get('document_id')
+        if not document_id:
+            return JsonResponse({'error': 'document_id is required'}, status=400)
+
+        # Verify document exists
+        document = get_object_or_404(Document, id=document_id, model=model)
+
+        result = vllm_service.generate_text_with_smart_rag(
+            model=model,
+            prompt=data.get('prompt', ''),
+            document_id=document_id,
+            max_tokens=data.get('max_tokens', 100),
+            temperature=data.get('temperature', 0.7),
+            top_p=data.get('top_p', 0.9),
+            strategy=data.get('strategy')
+        )
+
+        return JsonResponse(result)
+
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@require_http_methods(["GET"])
+def list_documents(request, model_id):
+    """List all documents for a model"""
+    model = get_object_or_404(LLMModel, id=model_id)
+    documents = Document.objects.filter(model=model).values(
+        'id', 'title', 'created_at', 'updated_at', 'is_indexed', 'estimated_tokens'
+    )
+
+    return JsonResponse({'documents': list(documents)})
+
+
+@require_http_methods(["GET"])
+def get_document_chunks(request, model_id, document_id):
+    """Get all chunks for a specific document"""
+    model = get_object_or_404(LLMModel, id=model_id)
+    vector_service = TokenAwareVectorService(model)
+
+    chunks = vector_service.get_document_chunks_by_id(document_id)
+
+    return JsonResponse({'chunks': chunks})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def search_document_chunks(request, model_id, document_id):
+    """Search for relevant chunks within a specific document"""
+    try:
+        model = get_object_or_404(LLMModel, id=model_id)
+        data = json.loads(request.body)
+
+        query = data.get('query', '')
+        k = data.get('k', 5)
+
+        vector_service = TokenAwareVectorService(model)
+        chunks = vector_service.search_document_chunks(document_id, query, k)
+
+        return JsonResponse({'chunks': chunks})
+
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def add_document_api(request, model_id):
+    """Add a document via API"""
+    try:
+        model = get_object_or_404(LLMModel, id=model_id)
+        data = json.loads(request.body)
+
+        title = data.get('title', '')
+        content = data.get('content', '')
+
+        if not title or not content:
+            return JsonResponse({'error': 'title and content are required'}, status=400)
+
+        # Create document
+        document = Document.objects.create(
+            model=model,
+            title=title,
+            content=content,
+            metadata=data.get('metadata', {})
+        )
+
+        # Add to vector store
+        vector_service = TokenAwareVectorService(model)
+        success = vector_service.add_document_to_vector_store(
+            document=document,
+            target_chunk_tokens=data.get('chunk_tokens', 300),
+            overlap_tokens=data.get('overlap_tokens', 50)
+        )
+
+        if success:
+            return JsonResponse({
+                'success': True,
+                'document_id': str(document.id),
+                'message': 'Document added successfully'
+            })
+        else:
+            return JsonResponse({'error': 'Failed to add document to vector store'}, status=500)
+
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@require_http_methods(["GET"])
+def get_request_details(request, request_id):
+    """Get detailed information about a specific request"""
+    try:
+        llm_request = get_object_or_404(LLMRequest, id=request_id)
+
+        # Prepare detailed response data
+        data = {
+            'success': True,
+            'request': {
+                'id': llm_request.id,
+                'created_at': llm_request.created_at.isoformat(),
+                'model_name': llm_request.get_model_name(),
+                'prompt': llm_request.prompt,
+                'response': llm_request.response,
+                'duration': llm_request.duration,
+                'tokens_generated': llm_request.tokens_generated,
+                'tokens_prompt': llm_request.tokens_prompt,
+                'status': llm_request.status,
+                'error_message': llm_request.error_message,
+                'temperature': llm_request.temperature,
+                'top_p': llm_request.top_p,
+                'max_tokens': llm_request.max_tokens,
+                'rag_enabled': llm_request.rag_enabled,
+                'document_id': str(llm_request.document_id) if llm_request.document_id else None,
+                'context_chunks_used': llm_request.context_chunks_used,
+                'total_context_tokens': llm_request.total_context_tokens,
+                'strategy_used': llm_request.strategy_used,
+                'chunks_processed': llm_request.chunks_processed,
+                'map_reduce_steps': llm_request.map_reduce_steps,
+                'logs': llm_request.logs or 'No detailed logs available for this request.',
+            }
+        }
+
+        return JsonResponse(data)
+
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
+
+
+@require_http_methods(["GET"])
+def export_request_data(request, request_id):
+    """Export complete request data as JSON file"""
+    try:
+        llm_request = get_object_or_404(LLMRequest, id=request_id)
+
+        # Prepare export data
+        export_data = {
+            'export_info': {
+                'exported_at': timezone.now().isoformat(),
+                'exported_by': 'LLM Dashboard',
+                'request_id': llm_request.id,
+            },
+            'request_data': {
+                'id': llm_request.id,
+                'created_at': llm_request.created_at.isoformat(),
+                'model_name': llm_request.get_model_name(),
+                'model_id': llm_request.model.id if llm_request.model else None,
+                'prompt': llm_request.prompt,
+                'response': llm_request.response,
+                'duration': llm_request.duration,
+                'tokens_generated': llm_request.tokens_generated,
+                'tokens_prompt': llm_request.tokens_prompt,
+                'status': llm_request.status,
+                'error_message': llm_request.error_message,
+                'temperature': llm_request.temperature,
+                'top_p': llm_request.top_p,
+                'max_tokens': llm_request.max_tokens,
+                'rag_enabled': llm_request.rag_enabled,
+                'document_id': str(llm_request.document_id) if llm_request.document_id else None,
+                'context_chunks_used': llm_request.context_chunks_used,
+                'total_context_tokens': llm_request.total_context_tokens,
+                'strategy_used': llm_request.strategy_used,
+                'chunks_processed': llm_request.chunks_processed,
+                'map_reduce_steps': llm_request.map_reduce_steps,
+                'logs': llm_request.logs,
+            }
+        }
+
+        # Create JSON response
+        response = HttpResponse(
+            json.dumps(export_data, indent=2),
+            content_type='application/json'
+        )
+        response[
+            'Content-Disposition'] = f'attachment; filename="request_{request_id}_{timezone.now().strftime("%Y%m%d_%H%M%S")}.json"'
+
+        return response
+
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
