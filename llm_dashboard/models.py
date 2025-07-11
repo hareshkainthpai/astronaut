@@ -149,6 +149,9 @@ class LLMRequest(models.Model):
     chunks_processed = models.IntegerField(default=0)
     map_reduce_steps = models.JSONField(default=list)  # Track map-reduce steps
 
+    # New field for detailed logs
+    logs = models.TextField(blank=True)  # Store detailed processing logs
+
     def set_response(self, response):
         self.response = response
         self.save()
@@ -158,3 +161,16 @@ class LLMRequest(models.Model):
         current.append(chunk)
         self.response = json.dumps(current)
         self.save()
+
+    def add_log(self, message):
+        """Add a log entry with timestamp"""
+        timestamp = timezone.now().strftime('%Y-%m-%d %H:%M:%S')
+        log_entry = f"[{timestamp}] {message}\n"
+        self.logs = (self.logs or '') + log_entry
+        self.save()
+
+    def get_model_name(self):
+        return self.model.name if self.model else 'Unknown'
+
+    class Meta:
+        ordering = ['-created_at']

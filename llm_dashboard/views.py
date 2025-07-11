@@ -347,7 +347,10 @@ class DashboardView(TemplateView):
         # Get the first model (should only be one active model)
         context['model'] = LLMModel.objects.filter(status__in=['LOADING', 'LOADED', 'ERROR']).first()
 
-        context['recent_requests'] = LLMRequest.objects.order_by('-created_at')[:10]
+        # Add recent requests with all needed fields
+        recent_requests = LLMRequest.objects.select_related('model').order_by('-created_at')[:10]
+        context['recent_requests'] = recent_requests
+
         context['available_models'] = get_available_models()
 
         # Get GPU count safely
@@ -858,3 +861,102 @@ def add_document_api(request, model_id):
 
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
+
+
+@require_http_methods(["GET"])
+def get_request_details(request, request_id):
+    """Get detailed information about a specific request"""
+    try:
+        llm_request = get_object_or_404(LLMRequest, id=request_id)
+
+        # Prepare detailed response data
+        data = {
+            'success': True,
+            'request': {
+                'id': llm_request.id,
+                'created_at': llm_request.created_at.isoformat(),
+                'model_name': llm_request.get_model_name(),
+                'prompt': llm_request.prompt,
+                'response': llm_request.response,
+                'duration': llm_request.duration,
+                'tokens_generated': llm_request.tokens_generated,
+                'tokens_prompt': llm_request.tokens_prompt,
+                'status': llm_request.status,
+                'error_message': llm_request.error_message,
+                'temperature': llm_request.temperature,
+                'top_p': llm_request.top_p,
+                'max_tokens': llm_request.max_tokens,
+                'rag_enabled': llm_request.rag_enabled,
+                'document_id': str(llm_request.document_id) if llm_request.document_id else None,
+                'context_chunks_used': llm_request.context_chunks_used,
+                'total_context_tokens': llm_request.total_context_tokens,
+                'strategy_used': llm_request.strategy_used,
+                'chunks_processed': llm_request.chunks_processed,
+                'map_reduce_steps': llm_request.map_reduce_steps,
+                'logs': llm_request.logs or 'No detailed logs available for this request.',
+            }
+        }
+
+        return JsonResponse(data)
+
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
+
+
+@require_http_methods(["GET"])
+def export_request_data(request, request_id):
+    """Export complete request data as JSON file"""
+    try:
+        llm_request = get_object_or_404(LLMRequest, id=request_id)
+
+        # Prepare export data
+        export_data = {
+            'export_info': {
+                'exported_at': timezone.now().isoformat(),
+                'exported_by': 'LLM Dashboard',
+                'request_id': llm_request.id,
+            },
+            'request_data': {
+                'id': llm_request.id,
+                'created_at': llm_request.created_at.isoformat(),
+                'model_name': llm_request.get_model_name(),
+                'model_id': llm_request.model.id if llm_request.model else None,
+                'prompt': llm_request.prompt,
+                'response': llm_request.response,
+                'duration': llm_request.duration,
+                'tokens_generated': llm_request.tokens_generated,
+                'tokens_prompt': llm_request.tokens_prompt,
+                'status': llm_request.status,
+                'error_message': llm_request.error_message,
+                'temperature': llm_request.temperature,
+                'top_p': llm_request.top_p,
+                'max_tokens': llm_request.max_tokens,
+                'rag_enabled': llm_request.rag_enabled,
+                'document_id': str(llm_request.document_id) if llm_request.document_id else None,
+                'context_chunks_used': llm_request.context_chunks_used,
+                'total_context_tokens': llm_request.total_context_tokens,
+                'strategy_used': llm_request.strategy_used,
+                'chunks_processed': llm_request.chunks_processed,
+                'map_reduce_steps': llm_request.map_reduce_steps,
+                'logs': llm_request.logs,
+            }
+        }
+
+        # Create JSON response
+        response = HttpResponse(
+            json.dumps(export_data, indent=2),
+            content_type='application/json'
+        )
+        response[
+            'Content-Disposition'] = f'attachment; filename="request_{request_id}_{timezone.now().strftime("%Y%m%d_%H%M%S")}.json"'
+
+        return response
+
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)

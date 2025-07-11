@@ -1,4 +1,3 @@
-
 {% extends "base.html" %}
 {% load static %}
 
@@ -332,6 +331,8 @@
 
     .requests-table tbody tr {
         border-bottom: 1px solid #f8f9fa;
+        cursor: pointer;
+        transition: background-color 0.2s ease;
     }
 
     .requests-table tbody tr:hover {
@@ -375,7 +376,7 @@
         height: 6px;
         background: #28a745;
         border-radius: 50%;
-        animation: pulse 2s infinite;
+        animation: pulse 1s infinite;
     }
 
     @keyframes pulse {
@@ -398,6 +399,123 @@
     @keyframes spin {
         from { transform: rotate(0deg); }
         to { transform: rotate(360deg); }
+    }
+
+    /* Request details modal styles */
+    .request-details-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 1rem;
+        margin-bottom: 2rem;
+    }
+
+    .request-detail-item {
+        background: #f8f9fa;
+        border-radius: 0.5rem;
+        padding: 1rem;
+        border: 1px solid #dee2e6;
+        text-align: center;
+    }
+
+    .request-detail-value {
+        font-size: 1.25rem;
+        font-weight: 700;
+        color: #495057;
+        margin-bottom: 0.25rem;
+    }
+
+    .request-detail-label {
+        font-size: 0.8rem;
+        color: #6c757d;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    .request-content-section {
+        background: white;
+        border-radius: 0.5rem;
+        border: 1px solid #dee2e6;
+        margin-bottom: 1.5rem;
+        overflow: hidden;
+    }
+
+    .request-content-header {
+        background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+        padding: 1rem 1.5rem;
+        border-bottom: 1px solid #dee2e6;
+    }
+
+    .request-content-title {
+        font-size: 1rem;
+        font-weight: 600;
+        margin: 0;
+        color: #212529;
+    }
+
+    .request-content-body {
+        padding: 1.5rem;
+    }
+
+    .request-content-text {
+        font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace;
+        font-size: 0.9rem;
+        line-height: 1.6;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        background: #f8f9fa;
+        padding: 1rem;
+        border-radius: 0.375rem;
+        border: 1px solid #dee2e6;
+        max-height: 300px;
+        overflow-y: auto;
+    }
+
+    .request-logs-content {
+        font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace;
+        font-size: 0.85rem;
+        line-height: 1.5;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        background: #1a1a1a;
+        color: #e9ecef;
+        padding: 1rem;
+        border-radius: 0.375rem;
+        max-height: 400px;
+        overflow-y: auto;
+    }
+
+    .copy-button {
+        position: relative;
+        top: -0.125rem;
+    }
+
+    .parameter-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+        gap: 0.75rem;
+        margin-top: 1rem;
+    }
+
+    .parameter-item {
+        background: #f8f9fa;
+        border-radius: 0.375rem;
+        padding: 0.75rem;
+        border: 1px solid #dee2e6;
+        text-align: center;
+    }
+
+    .parameter-value {
+        font-size: 1rem;
+        font-weight: 600;
+        color: #495057;
+        margin-bottom: 0.25rem;
+    }
+
+    .parameter-label {
+        font-size: 0.75rem;
+        color: #6c757d;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
     }
 </style>
 {% endblock %}
@@ -556,7 +674,7 @@
             <div class="widget-card">
                 <div class="widget-header">
                     <h3 class="widget-title">Recent Requests</h3>
-                    <p class="widget-subtitle">Latest model interactions and performance</p>
+                    <p class="widget-subtitle">Latest model interactions and performance • Click to view details</p>
                 </div>
                 <div class="widget-body p-0">
                     <div class="table-responsive">
@@ -568,14 +686,16 @@
                                     <th>Status</th>
                                     <th>Duration</th>
                                     <th>Tokens</th>
+                                    <th>Prompt Preview</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 {% for request in recent_requests %}
-                                <tr>
+                                <tr onclick="showRequestDetails({{ request.id }})"
+                                    title="Click to view full request details">
                                     <td>
                                         <div class="fw-bold">{{ request.created_at|date:"M d" }}</div>
-                                        <small class="text-muted">{{ request.created_at|date:"H:i" }}</small>
+                                        <small class="text-muted">{{ request.created_at|date:"H:i:s" }}</small>
                                     </td>
                                     <td>
                                         <strong>{{ request.model.name|default:"-" }}</strong>
@@ -591,10 +711,15 @@
                                     <td>
                                         <strong>{{ request.tokens_generated }}</strong>
                                     </td>
+                                    <td>
+                                        <div class="text-truncate" style="max-width: 200px;">
+                                            {{ request.prompt|truncatechars:50 }}
+                                        </div>
+                                    </td>
                                 </tr>
                                 {% empty %}
                                 <tr>
-                                    <td colspan="5" class="text-center py-4">
+                                    <td colspan="6" class="text-center py-4">
                                         <div class="text-muted">
                                             <i class="fas fa-inbox fa-2x mb-2 d-block"></i>
                                             No recent requests
@@ -709,7 +834,40 @@
     </div>
 </div>
 
-<!-- Keep all existing modals (they remain the same) -->
+<!-- Request Details Modal -->
+<div class="modal fade" id="requestDetailsModal" tabindex="-1">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div>
+                    <h5 class="modal-title">
+                        <i class="fas fa-file-alt me-2"></i>Request Details
+                        <span id="requestModalId" class="badge bg-secondary ms-2"></span>
+                    </h5>
+                    <small class="text-muted">
+                        <span id="requestModalTime"></span> •
+                        Model: <strong id="requestModalModel"></strong>
+                    </small>
+                </div>
+                <div class="d-flex gap-2">
+                    <button type="button" class="btn btn-sm btn-outline-success" onclick="downloadRequestData()">
+                        <i class="fas fa-download me-1"></i>Download
+                    </button>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+            </div>
+            <div class="modal-body" id="requestDetailsContent">
+                <!-- Content will be loaded here -->
+                <div class="text-center p-4">
+                    <i class="fas fa-spinner fa-spin fa-2x"></i>
+                    <p class="mt-2">Loading request details...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Keep all existing modals -->
 <!-- Load Model Modal -->
 <div class="modal fade" id="loadModelModal" tabindex="-1">
     <div class="modal-dialog modal-lg">
@@ -942,6 +1100,7 @@
     let currentBrowsePath = '';
     let selectedDirectoryPath = '';
     let currentModelId = null;
+    let currentRequestId = null;
     let logsRefreshInterval = null;
     let gpuStatsInterval = null;
 
@@ -963,17 +1122,255 @@
         }
     });
 
+    // Request Details Functions
+    function showRequestDetails(requestId) {
+        currentRequestId = requestId;
+        const modal = new bootstrap.Modal(document.getElementById('requestDetailsModal'));
+        modal.show();
+        loadRequestDetails(requestId);
+    }
+
+    function loadRequestDetails(requestId) {
+        const content = document.getElementById('requestDetailsContent');
+        content.innerHTML = `
+            <div class="text-center p-4">
+                <i class="fas fa-spinner fa-spin fa-2x"></i>
+                <p class="mt-2">Loading request details...</p>
+            </div>
+        `;
+
+        fetch(`/llm-dashboard/api/request/${requestId}/details/`)
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    displayRequestDetails(data.request);
+                } else {
+                    content.innerHTML = `
+                        <div class="alert alert-danger">
+                            <i class="fas fa-exclamation-triangle me-2"></i>
+                            Error loading request details: ${data.error || 'Unknown error'}
+                        </div>
+                    `;
+                }
+            })
+            .catch(error => {
+                console.error('Error loading request details:', error);
+                content.innerHTML = `
+                    <div class="alert alert-danger">
+                        <i class="fas fa-exclamation-triangle me-2"></i>
+                        Error loading request details: ${error.message}
+                    </div>
+                `;
+            });
+    }
+
+    function displayRequestDetails(request) {
+        const content = document.getElementById('requestDetailsContent');
+
+        // Update modal header
+        document.getElementById('requestModalId').textContent = `#${request.id}`;
+        document.getElementById('requestModalTime').textContent = new Date(request.created_at).toLocaleString();
+        document.getElementById('requestModalModel').textContent = request.model_name || 'Unknown';
+
+        // Generate the content
+        const html = `
+            <!-- Request Summary -->
+            <div class="request-details-grid">
+                <div class="request-detail-item">
+                    <div class="request-detail-value">${request.status}</div>
+                    <div class="request-detail-label">Status</div>
+                </div>
+                <div class="request-detail-item">
+                    <div class="request-detail-value">${request.duration ? request.duration.toFixed(3) + 's' : 'N/A'}</div>
+                    <div class="request-detail-label">Duration</div>
+                </div>
+                <div class="request-detail-item">
+                    <div class="request-detail-value">${request.tokens_prompt || 0}</div>
+                    <div class="request-detail-label">Input Tokens</div>
+                </div>
+                <div class="request-detail-item">
+                    <div class="request-detail-value">${request.tokens_generated || 0}</div>
+                    <div class="request-detail-label">Output Tokens</div>
+                </div>
+                <div class="request-detail-item">
+                    <div class="request-detail-value">${((request.tokens_generated || 0) / (request.duration || 1)).toFixed(1)}</div>
+                    <div class="request-detail-label">Tokens/sec</div>
+                </div>
+                <div class="request-detail-item">
+                    <div class="request-detail-value">${request.rag_enabled ? 'Yes' : 'No'}</div>
+                    <div class="request-detail-label">RAG Enabled</div>
+                </div>
+            </div>
+
+            <!-- Request Parameters -->
+            <div class="request-content-section">
+                <div class="request-content-header">
+                    <h6 class="request-content-title">Request Parameters</h6>
+                </div>
+                <div class="request-content-body">
+                    <div class="parameter-grid">
+                        <div class="parameter-item">
+                            <div class="parameter-value">${request.temperature || 0.7}</div>
+                            <div class="parameter-label">Temperature</div>
+                        </div>
+                        <div class="parameter-item">
+                            <div class="parameter-value">${request.top_p || 0.9}</div>
+                            <div class="parameter-label">Top P</div>
+                        </div>
+                        <div class="parameter-item">
+                            <div class="parameter-value">${request.max_tokens || 512}</div>
+                            <div class="parameter-label">Max Tokens</div>
+                        </div>
+                        <div class="parameter-item">
+                            <div class="parameter-value">${request.strategy_used || 'direct'}</div>
+                            <div class="parameter-label">Strategy</div>
+                        </div>
+                        <div class="parameter-item">
+                            <div class="parameter-value">${request.chunks_processed || 0}</div>
+                            <div class="parameter-label">Chunks Processed</div>
+                        </div>
+                        <div class="parameter-item">
+                            <div class="parameter-value">${request.total_context_tokens || 0}</div>
+                            <div class="parameter-label">Context Tokens</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Prompt -->
+            <div class="request-content-section">
+                <div class="request-content-header">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <h6 class="request-content-title">Prompt</h6>
+                        <button class="btn btn-sm btn-outline-primary copy-button" onclick="copyToClipboard('prompt-content')">
+                            <i class="fas fa-copy me-1"></i>Copy
+                        </button>
+                    </div>
+                </div>
+                <div class="request-content-body">
+                    <div class="request-content-text" id="prompt-content">${request.prompt || 'No prompt available'}</div>
+                </div>
+            </div>
+
+            <!-- Response -->
+            <div class="request-content-section">
+                <div class="request-content-header">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <h6 class="request-content-title">Response</h6>
+                        <button class="btn btn-sm btn-outline-primary copy-button" onclick="copyToClipboard('response-content')">
+                            <i class="fas fa-copy me-1"></i>Copy
+                        </button>
+                    </div>
+                </div>
+                <div class="request-content-body">
+                    <div class="request-content-text" id="response-content">${request.response || 'No response available'}</div>
+                </div>
+            </div>
+
+            ${request.error_message ? `
+            <!-- Error Details -->
+            <div class="request-content-section">
+                <div class="request-content-header">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <h6 class="request-content-title text-danger">Error Details</h6>
+                        <button class="btn btn-sm btn-outline-primary copy-button" onclick="copyToClipboard('error-content')">
+                            <i class="fas fa-copy me-1"></i>Copy
+                        </button>
+                    </div>
+                </div>
+                <div class="request-content-body">
+                    <div class="request-content-text" id="error-content">${request.error_message}</div>
+                </div>
+            </div>
+            ` : ''}
+
+            ${request.context_chunks_used && request.context_chunks_used.length > 0 ? `
+            <!-- RAG Context -->
+            <div class="request-content-section">
+                <div class="request-content-header">
+                    <h6 class="request-content-title">RAG Context Chunks Used</h6>
+                </div>
+                <div class="request-content-body">
+                    <div class="request-content-text">${JSON.stringify(request.context_chunks_used, null, 2)}</div>
+                </div>
+            </div>
+            ` : ''}
+
+            ${request.map_reduce_steps && request.map_reduce_steps.length > 0 ? `
+            <!-- Map-Reduce Steps -->
+            <div class="request-content-section">
+                <div class="request-content-header">
+                    <h6 class="request-content-title">Map-Reduce Processing Steps</h6>
+                </div>
+                <div class="request-content-body">
+                    <div class="request-content-text">${JSON.stringify(request.map_reduce_steps, null, 2)}</div>
+                </div>
+            </div>
+            ` : ''}
+
+            <!-- Request Logs -->
+            <div class="request-content-section">
+                <div class="request-content-header">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <h6 class="request-content-title">Processing Logs</h6>
+                        <button class="btn btn-sm btn-outline-primary copy-button" onclick="copyToClipboard('logs-content')">
+                            <i class="fas fa-copy me-1"></i>Copy
+                        </button>
+                    </div>
+                </div>
+                <div class="request-content-body">
+                    <div class="request-logs-content" id="logs-content">${request.logs || 'No detailed logs available for this request.'}</div>
+                </div>
+            </div>
+        `;
+
+        content.innerHTML = html;
+    }
+
+    function copyToClipboard(elementId) {
+        const element = document.getElementById(elementId);
+        const text = element.textContent;
+
+        navigator.clipboard.writeText(text).then(() => {
+            showAlert('Copied to clipboard!', 'success');
+        }).catch(err => {
+            console.error('Failed to copy:', err);
+            showAlert('Failed to copy to clipboard', 'danger');
+        });
+    }
+
+    function downloadRequestData() {
+        if (!currentRequestId) return;
+
+        fetch(`/llm-dashboard/api/request/${currentRequestId}/export/`)
+            .then(response => response.blob())
+            .then(blob => {
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `request_${currentRequestId}_${new Date().toISOString().split('T')[0]}.json`;
+                document.body.appendChild(a);
+                a.click();
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
+            })
+            .catch(error => {
+                console.error('Error downloading request data:', error);
+                showAlert('Error downloading request data: ' + error.message, 'danger');
+            });
+    }
+
     // GPU Auto-refresh functions
     function startGPUAutoRefresh() {
         // Clear existing interval if any
         stopGPUAutoRefresh();
 
-        // Start new interval - refresh every 5 seconds
+        // Start new interval - refresh every 1 second
         gpuStatsInterval = setInterval(() => {
             refreshGPUStats(false); // false = silent refresh (no loading indicators)
         }, 1000);
 
-        console.log('GPU auto-refresh started (every 5 seconds)');
+        console.log('GPU auto-refresh started (every 1 second)');
     }
 
     function stopGPUAutoRefresh() {
@@ -1549,6 +1946,11 @@
             logsRefreshInterval = null;
         }
         currentModelId = null;
+    });
+
+    // Clean up request details when modal is closed
+    document.getElementById('requestDetailsModal').addEventListener('hidden.bs.modal', function () {
+        currentRequestId = null;
     });
 </script>
 {% endblock %}

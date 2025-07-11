@@ -21,6 +21,10 @@ urlpatterns = [
     # GPU Stats API
     path('api/gpu-stats/', views.api_gpu_stats, name='api_gpu_stats'),
 
+    # Request Details API
+    path('api/request/<int:request_id>/details/', views.get_request_details, name='get_request_details'),
+    path('api/request/<int:request_id>/export/', views.export_request_data, name='export_request_data'),
+
 
     # RAG endpoints
     path('api/models/<int:model_id>/generate-with-document-rag/', views.generate_with_document_rag, name='generate_with_document_rag'),
