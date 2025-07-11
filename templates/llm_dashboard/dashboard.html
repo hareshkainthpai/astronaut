@@ -890,10 +890,9 @@
                         <div class="col-md-6 mb-3">
                             <label class="form-label">GPUs to Use</label>
                             <select class="form-control" id="tensorParallelSize">
-                                <option value="1">1 GPU</option>
                                 {% for i in "12345678"|make_list %}
                                     {% if forloop.counter <= gpu_count %}
-                                        <option value="{{ forloop.counter }}">{{ forloop.counter }} GPUs</option>
+                                        <option value="{{ forloop.counter }}">{{ forloop.counter }} GPU(s)</option>
                                     {% endif %}
                                 {% endfor %}
                             </select>

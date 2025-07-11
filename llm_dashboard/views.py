@@ -673,9 +673,16 @@ def generate_text(request):
             status='PENDING'
         )
 
+        # Add initial log
+        llm_request.add_log(f"Request started - Model: {model.name}")
+        llm_request.add_log(
+            f"Parameters: temp={llm_request.temperature}, top_p={llm_request.top_p}, max_tokens={llm_request.max_tokens}")
+
         start_time = timezone.now()
 
         try:
+            llm_request.add_log("Starting text generation...")
+
             # Generate text using vLLM
             result = vllm_service.generate_text(
                 model=model,
