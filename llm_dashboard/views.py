@@ -166,6 +166,26 @@ def stop_loading(request, model_id):
         return JsonResponse({'success': False, 'error': str(e)}, status=500)
 
 
+@csrf_exempt
+@require_http_methods(["GET"])
+def api_gpu_stats(request):
+    """API endpoint to get GPU statistics"""
+    try:
+        gpu_stats = get_gpu_stats()
+        gpu_count = len([gpu for gpu in gpu_stats if not gpu.get('error')])
+
+        return JsonResponse({
+            'success': True,
+            'gpu_stats': gpu_stats,
+            'gpu_count': gpu_count,
+            'timestamp': timezone.now().isoformat()
+        })
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
+
 
 @csrf_exempt
 @require_http_methods(["GET"])

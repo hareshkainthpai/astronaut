@@ -1,223 +1,566 @@
+
 {% extends "base.html" %}
 {% load static %}
 
-{% block content %}
-<div class="container-fluid">
-    <!-- Model Management Section -->
-    <div class="row mb-4">
-        <div class="col-12">
-            <div class="card">
-                <div class="card-header d-flex justify-content-between align-items-center">
-                    <h5 class="card-title mb-0">Model Management</h5>
-                    <button class="btn btn-success" onclick="showLoadModelDialog()">
-                        <i class="fas fa-upload"></i> Load New Model
-                    </button>
-                </div>
-                <div class="card-body">
-                    {% if model %}
-                        <div class="row">
-                            <div class="col-md-8">
-                                <h6>{{ model.name }}</h6>
-                                <div class="row">
-                                    <div class="col-md-6">
-                                        <p class="mb-1">Status: <span class="badge {% if model.status == 'LOADED' %}bg-success{% elif model.status == 'LOADING' %}bg-warning{% else %}bg-danger{% endif %}">{{ model.status }}</span></p>
-                                        <p class="mb-1">Memory Usage: {{ model.memory_usage|floatformat:2 }} GB</p>
-                                    </div>
-                                    <div class="col-md-6">
-                                        <p class="mb-1">GPUs Used: {{ model.tensor_parallel_size }}</p>
-                                        <p class="mb-1">Model Size: {{ model.get_model_size_gb|floatformat:2 }} GB</p>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="col-md-4">
-                                <div class="d-flex gap-2 justify-content-end flex-wrap">
-                                    {% if model.status == 'LOADED' %}
-                                        <button class="btn btn-danger" onclick="unloadModel({{ model.id }})">
-                                            <i class="fas fa-stop"></i> Unload
-                                        </button>
-                                        <button class="btn btn-primary" onclick="showTestDialog()">
-                                            <i class="fas fa-play"></i> Test
-                                        </button>
-                                    {% elif model.status == 'LOADING' %}
-                                        <button class="btn btn-warning" onclick="showLoadingLogsModal({{ model.id }})">
-                                            <i class="fas fa-spinner fa-spin"></i> Loading...
-                                        </button>
-                                        <button class="btn btn-danger" onclick="stopLoading({{ model.id }})">
-                                            <i class="fas fa-stop"></i> Stop Loading
-                                        </button>
-                                    {% elif model.status == 'ERROR' %}
-                                        <button class="btn btn-danger" onclick="showLoadingLogsModal({{ model.id }})">
-                                            <i class="fas fa-exclamation-triangle"></i> View Error Logs
-                                        </button>
-                                        <button class="btn btn-secondary" onclick="unloadModel({{ model.id }})">
-                                            <i class="fas fa-times"></i> Remove
-                                        </button>
-                                    {% else %}
-                                        <button class="btn btn-secondary" onclick="unloadModel({{ model.id }})">
-                                            <i class="fas fa-times"></i> Remove
-                                        </button>
-                                    {% endif %}
+{% block extra_css %}
+<style>
+    body {
+        background-color: #f8f9fa;
+        font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    }
 
-                                    <!-- Always show logs button if there are any logs -->
-                                    {% if model.loading_logs %}
-                                        <button class="btn btn-outline-info btn-sm" onclick="showLoadingLogsModal({{ model.id }})" title="View Loading Logs">
-                                            <i class="fas fa-file-alt"></i> Logs
-                                        </button>
-                                    {% endif %}
+    .metric-card {
+        background: white;
+        border-radius: 1rem;
+        padding: 1.5rem;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+        border: 1px solid #e9ecef;
+        margin-bottom: 1.5rem;
+        transition: all 0.3s ease;
+        height: 100%;
+    }
+
+    .metric-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.12);
+    }
+
+    .metric-icon {
+        width: 48px;
+        height: 48px;
+        border-radius: 12px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.5rem;
+        margin-bottom: 1rem;
+    }
+
+    .metric-value {
+        font-size: 2.5rem;
+        font-weight: 700;
+        line-height: 1;
+        margin-bottom: 0.5rem;
+    }
+
+    .metric-label {
+        font-size: 0.9rem;
+        color: #6c757d;
+        font-weight: 500;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    .metric-change {
+        font-size: 0.85rem;
+        font-weight: 600;
+        margin-top: 0.5rem;
+    }
+
+    .widget-card {
+        background: white;
+        border-radius: 1rem;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+        border: 1px solid #e9ecef;
+        margin-bottom: 1.5rem;
+        overflow: hidden;
+    }
+
+    .widget-header {
+        padding: 1.5rem 1.5rem 1rem;
+        background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+        border-bottom: 1px solid #dee2e6;
+    }
+
+    .widget-title {
+        font-size: 1.1rem;
+        font-weight: 600;
+        margin-bottom: 0.25rem;
+        color: #212529;
+    }
+
+    .widget-subtitle {
+        font-size: 0.85rem;
+        color: #6c757d;
+        margin: 0;
+    }
+
+    .widget-body {
+        padding: 1.5rem;
+    }
+
+    .status-indicator {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.5rem 1rem;
+        border-radius: 50px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    .status-loaded {
+        background: #d4edda;
+        color: #155724;
+    }
+
+    .status-loading {
+        background: #fff3cd;
+        color: #856404;
+    }
+
+    .status-error {
+        background: #f8d7da;
+        color: #721c24;
+    }
+
+    .model-info-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+        gap: 1rem;
+        margin: 1.5rem 0;
+    }
+
+    .model-info-item {
+        text-align: center;
+        padding: 1rem;
+        background: #f8f9fa;
+        border-radius: 0.5rem;
+        border: 1px solid #dee2e6;
+    }
+
+    .model-info-value {
+        font-size: 1.5rem;
+        font-weight: 700;
+        color: #495057;
+        margin-bottom: 0.25rem;
+    }
+
+    .model-info-label {
+        font-size: 0.8rem;
+        color: #6c757d;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    .gpu-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: 1.5rem;
+    }
+
+    .gpu-widget {
+        background: white;
+        border-radius: 1rem;
+        padding: 1.5rem;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+        border: 1px solid #e9ecef;
+        transition: all 0.3s ease;
+    }
+
+    .gpu-widget:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.12);
+    }
+
+    .gpu-header {
+        display: flex;
+        align-items: center;
+        margin-bottom: 1.5rem;
+    }
+
+    .gpu-icon {
+        width: 40px;
+        height: 40px;
+        border-radius: 10px;
+        background: linear-gradient(135deg, #36d1dc 0%, #5b86e5 100%);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        font-size: 1.2rem;
+        margin-right: 1rem;
+    }
+
+    .gpu-title {
+        font-size: 1.1rem;
+        font-weight: 600;
+        margin-bottom: 0.25rem;
+    }
+
+    .gpu-subtitle {
+        font-size: 0.85rem;
+        color: #6c757d;
+    }
+
+    .progress-item {
+        margin-bottom: 1.5rem;
+    }
+
+    .progress-item:last-child {
+        margin-bottom: 0;
+    }
+
+    .progress-header {
+        display: flex;
+        justify-content: between;
+        align-items: center;
+        margin-bottom: 0.5rem;
+    }
+
+    .progress-label {
+        font-size: 0.85rem;
+        color: #495057;
+        font-weight: 500;
+    }
+
+    .progress-value {
+        font-size: 0.85rem;
+        font-weight: 600;
+        color: #212529;
+    }
+
+    .progress-bar-custom {
+        height: 8px;
+        background: #e9ecef;
+        border-radius: 4px;
+        overflow: hidden;
+        position: relative;
+    }
+
+    .progress-fill {
+        height: 100%;
+        border-radius: 4px;
+        transition: width 0.3s ease;
+    }
+
+    .progress-fill.success {
+        background: linear-gradient(90deg, #56ab2f 0%, #a8e6cf 100%);
+    }
+
+    .progress-fill.warning {
+        background: linear-gradient(90deg, #f7971e 0%, #ffd200 100%);
+    }
+
+    .progress-fill.danger {
+        background: linear-gradient(90deg, #d66d75 0%, #e29587 100%);
+    }
+
+    .empty-state {
+        text-align: center;
+        padding: 3rem 2rem;
+        color: #6c757d;
+    }
+
+    .empty-state-icon {
+        font-size: 4rem;
+        margin-bottom: 1rem;
+        opacity: 0.3;
+    }
+
+    .empty-state h4 {
+        font-size: 1.5rem;
+        margin-bottom: 1rem;
+        color: #495057;
+    }
+
+    .action-buttons {
+        display: flex;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+        margin-top: 1.5rem;
+    }
+
+    .btn-custom {
+        padding: 0.75rem 1.5rem;
+        border-radius: 0.5rem;
+        font-weight: 600;
+        font-size: 0.9rem;
+        text-transform: none;
+        border: 2px solid transparent;
+        transition: all 0.3s ease;
+    }
+
+    .btn-primary-custom {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+    }
+
+    .btn-primary-custom:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+    }
+
+    .btn-danger-custom {
+        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+        color: white;
+    }
+
+    .btn-outline-custom {
+        border-color: #dee2e6;
+        color: #495057;
+        background: white;
+    }
+
+    .btn-outline-custom:hover {
+        background: #f8f9fa;
+        border-color: #adb5bd;
+    }
+
+    .requests-table {
+        margin: 0;
+    }
+
+    .requests-table th {
+        background: #f8f9fa;
+        border: none;
+        font-weight: 600;
+        font-size: 0.85rem;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: #495057;
+        padding: 1rem;
+    }
+
+    .requests-table td {
+        border: none;
+        padding: 1rem;
+        vertical-align: middle;
+    }
+
+    .requests-table tbody tr {
+        border-bottom: 1px solid #f8f9fa;
+    }
+
+    .requests-table tbody tr:hover {
+        background: #f8f9fa;
+    }
+
+    .status-badge {
+        padding: 0.25rem 0.75rem;
+        border-radius: 50px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    .status-badge.success {
+        background: #d4edda;
+        color: #155724;
+    }
+
+    .status-badge.warning {
+        background: #fff3cd;
+        color: #856404;
+    }
+
+    .status-badge.danger {
+        background: #f8d7da;
+        color: #721c24;
+    }
+
+    .refresh-indicator {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 0.8rem;
+        color: #28a745;
+    }
+
+    .refresh-dot {
+        width: 6px;
+        height: 6px;
+        background: #28a745;
+        border-radius: 50%;
+        animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+        0% { opacity: 1; }
+        50% { opacity: 0.5; }
+        100% { opacity: 1; }
+    }
+
+    .metric-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+        gap: 1.5rem;
+        margin-bottom: 2rem;
+    }
+
+    .loading-spinner {
+        animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- Key Metrics -->
+<div class="container mb-4">
+    <div class="metric-grid">
+        <div class="metric-card">
+            <div class="metric-icon" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
+                <i class="fas fa-chart-line"></i>
+            </div>
+            <div class="metric-value">{{ stats.total_requests }}</div>
+            <div class="metric-label">Total Requests</div>
+            <div class="metric-change text-success">
+                <i class="fas fa-arrow-up"></i> +{{ stats.hourly_requests }} this hour
+            </div>
+        </div>
+
+        <div class="metric-card">
+            <div class="metric-icon" style="background: linear-gradient(135deg, #36d1dc 0%, #5b86e5 100%); color: white;">
+                <i class="fas fa-clock"></i>
+            </div>
+            <div class="metric-value">{{ stats.hourly_requests }}</div>
+            <div class="metric-label">Hourly Requests</div>
+            <div class="metric-change text-info">
+                <i class="fas fa-info-circle"></i> Last hour activity
+            </div>
+        </div>
+
+        <div class="metric-card">
+            <div class="metric-icon" style="background: linear-gradient(135deg, #f7971e 0%, #ffd200 100%); color: white;">
+                <i class="fas fa-stopwatch"></i>
+            </div>
+            <div class="metric-value">{{ stats.avg_duration|default:0|floatformat:2 }}s</div>
+            <div class="metric-label">Avg Response Time</div>
+            <div class="metric-change text-warning">
+                <i class="fas fa-tachometer-alt"></i> Performance metric
+            </div>
+        </div>
+
+        <div class="metric-card">
+            <div class="metric-icon" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); color: white;">
+                <i class="fas fa-exclamation-triangle"></i>
+            </div>
+            <div class="metric-value">{{ stats.error_rate|floatformat:1 }}%</div>
+            <div class="metric-label">Error Rate</div>
+            <div class="metric-change {% if stats.error_rate > 5 %}text-danger{% else %}text-success{% endif %}">
+                <i class="fas fa-{% if stats.error_rate > 5 %}exclamation-triangle{% else %}check-circle{% endif %}"></i>
+                {% if stats.error_rate > 5 %}Needs attention{% else %}Healthy{% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Main Content -->
+<div class="container">
+    <div class="row">
+        <!-- Left Column -->
+        <div class="col-lg-8">
+            <!-- Model Management Widget -->
+            <div class="widget-card">
+                <div class="widget-header">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div>
+                            <h3 class="widget-title">Model Management</h3>
+                            <p class="widget-subtitle">Load and manage your AI models</p>
+                        </div>
+                        <button class="btn btn-primary-custom btn-custom" onclick="showLoadModelDialog()">
+                            <i class="fas fa-plus me-2"></i>Load Model
+                        </button>
+                    </div>
+                </div>
+                <div class="widget-body">
+                    {% if model %}
+                        <div class="d-flex align-items-center mb-3">
+                            <div class="me-3">
+                                {% if model.status == 'LOADED' %}
+                                    <i class="fas fa-robot fa-2x text-success"></i>
+                                {% elif model.status == 'LOADING' %}
+                                    <i class="fas fa-spinner fa-spin fa-2x text-warning"></i>
+                                {% elif model.status == 'ERROR' %}
+                                    <i class="fas fa-exclamation-triangle fa-2x text-danger"></i>
+                                {% endif %}
+                            </div>
+                            <div class="flex-grow-1">
+                                <h4 class="mb-1">{{ model.name }}</h4>
+                                <div class="status-indicator status-{{ model.status|lower }}">
+                                    <div class="refresh-dot"></div>
+                                    {{ model.status }}
                                 </div>
                             </div>
                         </div>
-                    {% else %}
-                        <div class="text-center py-4">
-                            <div class="mb-3">
-                                <i class="fas fa-robot fa-3x text-muted"></i>
+
+                        <div class="model-info-grid">
+                            <div class="model-info-item">
+                                <div class="model-info-value">{{ model.memory_usage|floatformat:1 }}</div>
+                                <div class="model-info-label">Memory (GB)</div>
                             </div>
-                            <h6 class="text-muted">No Model Loaded</h6>
-                            <p class="text-muted mb-3">Click "Load New Model" to get started with your first LLM model.</p>
-                            <button class="btn btn-success" onclick="showLoadModelDialog()">
-                                <i class="fas fa-upload"></i> Load Your First Model
+                            <div class="model-info-item">
+                                <div class="model-info-value">{{ model.tensor_parallel_size }}</div>
+                                <div class="model-info-label">GPUs Used</div>
+                            </div>
+                            <div class="model-info-item">
+                                <div class="model-info-value">{{ model.get_model_size_gb|floatformat:1 }}</div>
+                                <div class="model-info-label">Model Size (GB)</div>
+                            </div>
+                        </div>
+
+                        <div class="action-buttons">
+                            {% if model.status == 'LOADED' %}
+                                <button class="btn btn-primary-custom btn-custom" onclick="showTestDialog()">
+                                    <i class="fas fa-play me-2"></i>Test Model
+                                </button>
+                                <button class="btn btn-danger-custom btn-custom" onclick="unloadModel({{ model.id }})">
+                                    <i class="fas fa-stop me-2"></i>Unload
+                                </button>
+                            {% elif model.status == 'LOADING' %}
+                                <button class="btn btn-outline-custom btn-custom" onclick="showLoadingLogsModal({{ model.id }})">
+                                    <i class="fas fa-spinner loading-spinner me-2"></i>Loading...
+                                </button>
+                                <button class="btn btn-danger-custom btn-custom" onclick="stopLoading({{ model.id }})">
+                                    <i class="fas fa-stop me-2"></i>Stop
+                                </button>
+                            {% elif model.status == 'ERROR' %}
+                                <button class="btn btn-danger-custom btn-custom" onclick="showLoadingLogsModal({{ model.id }})">
+                                    <i class="fas fa-exclamation-triangle me-2"></i>View Logs
+                                </button>
+                                <button class="btn btn-outline-custom btn-custom" onclick="unloadModel({{ model.id }})">
+                                    <i class="fas fa-trash me-2"></i>Remove
+                                </button>
+                            {% endif %}
+
+                            {% if model.loading_logs %}
+                                <button class="btn btn-outline-custom btn-custom" onclick="showLoadingLogsModal({{ model.id }})">
+                                    <i class="fas fa-file-alt me-2"></i>Logs
+                                </button>
+                            {% endif %}
+                        </div>
+                    {% else %}
+                        <div class="empty-state">
+                            <div class="empty-state-icon">
+                                <i class="fas fa-robot"></i>
+                            </div>
+                            <h4>No Model Loaded</h4>
+                            <p>Get started by loading your first LLM model</p>
+                            <button class="btn btn-primary-custom btn-custom" onclick="showLoadModelDialog()">
+                                <i class="fas fa-plus me-2"></i>Load Your First Model
                             </button>
                         </div>
                     {% endif %}
                 </div>
             </div>
-        </div>
-    </div>
 
-    <!-- GPU Stats Section -->
-    <div class="row mb-4">
-        <div class="col-12">
-            <div class="card">
-                <div class="card-header d-flex justify-content-between align-items-center">
-                    <h5 class="card-title mb-0">GPU Statistics ({{ gpu_count }} GPUs Available)</h5>
-                    <button class="btn btn-sm btn-outline-primary" id="refresh-button" onclick="refreshGPUStats()">
-                        <i class="fas fa-sync-alt"></i> Refresh
-                    </button>
-                    <button class="btn btn-sm btn-danger" id="force-cleanup-button" onclick="forceCleanupGPUs()" title="Force cleanup all GPUs and kill all vLLM processes">
-                        <i class="fas fa-exclamation-triangle"></i> Force Cleanup GPUs
-                    </button>
+            <!-- Recent Requests Widget -->
+            <div class="widget-card">
+                <div class="widget-header">
+                    <h3 class="widget-title">Recent Requests</h3>
+                    <p class="widget-subtitle">Latest model interactions and performance</p>
                 </div>
-                <div class="card-body" id="gpu-stats-container">
-                    <div class="row" id="gpu-stats-content">
-                        {% for gpu in gpu_stats %}
-                            {% if gpu.error %}
-                                <div class="col-12">
-                                    <div class="alert alert-warning">
-                                        Unable to fetch GPU stats: {{ gpu.error }}
-                                    </div>
-                                </div>
-                            {% else %}
-                                <div class="col-md-6 col-xl-4 mb-4">
-                                    <div class="card h-100">
-                                        <div class="card-header">
-                                            <h6 class="card-title mb-0">{{ gpu.name }} (GPU {{ gpu.id }})</h6>
-                                        </div>
-                                        <div class="card-body">
-                                            <!-- Memory Usage Progress Bar -->
-                                            <div class="mb-3">
-                                                <label class="form-label">Memory Usage</label>
-                                                <div class="progress" style="height: 20px;">
-                                                    <div class="progress-bar {% if gpu.memory_percentage > 90 %}bg-danger{% elif gpu.memory_percentage > 70 %}bg-warning{% else %}bg-success{% endif %}"
-                                                         role="progressbar"
-                                                         style="width: {{ gpu.memory_percentage }}%"
-                                                         aria-valuenow="{{ gpu.memory_percentage }}"
-                                                         aria-valuemin="0"
-                                                         aria-valuemax="100">
-                                                        {{ gpu.memory_percentage }}%
-                                                    </div>
-                                                </div>
-                                                <small class="text-muted">
-                                                    Used: {{ gpu.memory_used|floatformat:1 }} GB /
-                                                    Total: {{ gpu.memory_total|floatformat:1 }} GB
-                                                </small>
-                                            </div>
-
-                                            <!-- GPU Utilization Progress Bar -->
-                                            <div class="mb-3">
-                                                <label class="form-label">GPU Utilization</label>
-                                                <div class="progress" style="height: 20px;">
-                                                    <div class="progress-bar {% if gpu.gpu_utilization > 90 %}bg-danger{% elif gpu.gpu_utilization > 70 %}bg-warning{% else %}bg-success{% endif %}"
-                                                         role="progressbar"
-                                                         style="width: {{ gpu.gpu_utilization }}%"
-                                                         aria-valuenow="{{ gpu.gpu_utilization }}"
-                                                         aria-valuemin="0"
-                                                         aria-valuemax="100">
-                                                        {{ gpu.gpu_utilization }}%
-                                                    </div>
-                                                </div>
-                                            </div>
-
-                                            <!-- Temperature -->
-                                            <div class="mb-3">
-                                                <label class="form-label">Temperature</label>
-                                                <div class="progress" style="height: 20px;">
-                                                    <div class="progress-bar {% if gpu.temperature > 80 %}bg-danger{% elif gpu.temperature > 60 %}bg-warning{% else %}bg-success{% endif %}"
-                                                         role="progressbar"
-                                                         style="width: {{ gpu.temperature }}%"
-                                                         aria-valuenow="{{ gpu.temperature }}"
-                                                         aria-valuemin="0"
-                                                         aria-valuemax="100">
-                                                        {{ gpu.temperature }}°C
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            {% endif %}
-                        {% endfor %}
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Stats Cards -->
-    <div class="row mb-4">
-        <div class="col-md-3">
-            <div class="card">
-                <div class="card-body">
-                    <h6 class="card-title">Total Requests</h6>
-                    <h2>{{ stats.total_requests }}</h2>
-                </div>
-            </div>
-        </div>
-        <div class="col-md-3">
-            <div class="card">
-                <div class="card-body">
-                    <h6 class="card-title">Requests (Last Hour)</h6>
-                    <h2>{{ stats.hourly_requests }}</h2>
-                </div>
-            </div>
-        </div>
-        <div class="col-md-3">
-            <div class="card">
-                <div class="card-body">
-                    <h6 class="card-title">Avg Duration</h6>
-                    <h2>{{ stats.avg_duration|default:0|floatformat:2 }}s</h2>
-                </div>
-            </div>
-        </div>
-        <div class="col-md-3">
-            <div class="card">
-                <div class="card-body">
-                    <h6 class="card-title">Error Rate</h6>
-                    <h2>{{ stats.error_rate|floatformat:1 }}%</h2>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Recent Requests Table -->
-    <div class="row">
-        <div class="col-12">
-            <div class="card">
-                <div class="card-header">
-                    <h5 class="card-title mb-0">Recent Requests</h5>
-                </div>
-                <div class="card-body">
+                <div class="widget-body p-0">
                     <div class="table-responsive">
-                        <table class="table">
+                        <table class="table requests-table">
                             <thead>
                                 <tr>
                                     <th>Time</th>
@@ -230,15 +573,33 @@
                             <tbody>
                                 {% for request in recent_requests %}
                                 <tr>
-                                    <td>{{ request.created_at|date:"Y-m-d H:i:s" }}</td>
-                                    <td>{{ request.model.name|default:"-" }}</td>
                                     <td>
-                                        <span class="badge {% if request.status == 'COMPLETED' %}bg-success{% elif request.status == 'ERROR' %}bg-danger{% else %}bg-warning{% endif %}">
+                                        <div class="fw-bold">{{ request.created_at|date:"M d" }}</div>
+                                        <small class="text-muted">{{ request.created_at|date:"H:i" }}</small>
+                                    </td>
+                                    <td>
+                                        <strong>{{ request.model.name|default:"-" }}</strong>
+                                    </td>
+                                    <td>
+                                        <span class="status-badge {% if request.status == 'COMPLETED' %}success{% elif request.status == 'ERROR' %}danger{% else %}warning{% endif %}">
                                             {{ request.status }}
                                         </span>
                                     </td>
-                                    <td>{{ request.duration|default:"-"|floatformat:2 }}s</td>
-                                    <td>{{ request.tokens_generated }}</td>
+                                    <td>
+                                        <strong>{{ request.duration|default:"-"|floatformat:2 }}s</strong>
+                                    </td>
+                                    <td>
+                                        <strong>{{ request.tokens_generated }}</strong>
+                                    </td>
+                                </tr>
+                                {% empty %}
+                                <tr>
+                                    <td colspan="5" class="text-center py-4">
+                                        <div class="text-muted">
+                                            <i class="fas fa-inbox fa-2x mb-2 d-block"></i>
+                                            No recent requests
+                                        </div>
+                                    </td>
                                 </tr>
                                 {% endfor %}
                             </tbody>
@@ -247,58 +608,166 @@
                 </div>
             </div>
         </div>
+
+        <!-- Right Column -->
+        <div class="col-lg-4">
+            <!-- GPU Statistics Widget -->
+            <div class="widget-card">
+                <div class="widget-header">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div>
+                            <h3 class="widget-title">GPU Statistics</h3>
+                            <p class="widget-subtitle">
+                                <span id="gpu-count">{{ gpu_count }}</span> GPUs Available
+                            </p>
+                        </div>
+                        <div class="d-flex align-items-center gap-2">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="autoRefreshToggle" checked>
+                                <label class="form-check-label" for="autoRefreshToggle">
+                                    Auto
+                                </label>
+                            </div>
+                            <button class="btn btn-outline-custom btn-sm" id="refresh-button" onclick="refreshGPUStats(true)">
+                                <i class="fas fa-sync-alt"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="refresh-indicator mt-2">
+                        <div class="refresh-dot"></div>
+                        <span>Auto-refreshing • Last updated: <span id="gpu-last-updated">{{ "now"|date:"H:i:s" }}</span></span>
+                    </div>
+                </div>
+                <div class="widget-body">
+                    <div class="gpu-grid" id="gpu-stats-content">
+                        {% for gpu in gpu_stats %}
+                            {% if gpu.error %}
+                                <div class="alert alert-warning">
+                                    <i class="fas fa-exclamation-triangle me-2"></i>
+                                    Unable to fetch GPU stats: {{ gpu.error }}
+                                </div>
+                            {% else %}
+                                <div class="gpu-widget" data-gpu-id="{{ gpu.id }}">
+                                    <div class="gpu-header">
+                                        <div class="gpu-icon">
+                                            <i class="fas fa-microchip"></i>
+                                        </div>
+                                        <div>
+                                            <div class="gpu-title">{{ gpu.name }}</div>
+                                            <div class="gpu-subtitle">GPU {{ gpu.id }}</div>
+                                        </div>
+                                    </div>
+
+                                    <div class="progress-item">
+                                        <div class="progress-header">
+                                            <span class="progress-label">Memory Usage</span>
+                                            <span class="progress-value memory-percentage">{{ gpu.memory_percentage }}%</span>
+                                        </div>
+                                        <div class="progress-bar-custom">
+                                            <div class="progress-fill memory-progress {% if gpu.memory_percentage > 90 %}danger{% elif gpu.memory_percentage > 70 %}warning{% else %}success{% endif %}"
+                                                 style="width: {{ gpu.memory_percentage }}%"></div>
+                                        </div>
+                                        <small class="text-muted memory-details">
+                                            {{ gpu.memory_used|floatformat:1 }} / {{ gpu.memory_total|floatformat:1 }} GB
+                                        </small>
+                                    </div>
+
+                                    <div class="progress-item">
+                                        <div class="progress-header">
+                                            <span class="progress-label">GPU Utilization</span>
+                                            <span class="progress-value gpu-utilization">{{ gpu.gpu_utilization }}%</span>
+                                        </div>
+                                        <div class="progress-bar-custom">
+                                            <div class="progress-fill utilization-progress {% if gpu.gpu_utilization > 90 %}danger{% elif gpu.gpu_utilization > 70 %}warning{% else %}success{% endif %}"
+                                                 style="width: {{ gpu.gpu_utilization }}%"></div>
+                                        </div>
+                                    </div>
+
+                                    <div class="progress-item">
+                                        <div class="progress-header">
+                                            <span class="progress-label">Temperature</span>
+                                            <span class="progress-value temperature">{{ gpu.temperature }}°C</span>
+                                        </div>
+                                        <div class="progress-bar-custom">
+                                            <div class="progress-fill temperature-progress {% if gpu.temperature > 80 %}danger{% elif gpu.temperature > 60 %}warning{% else %}success{% endif %}"
+                                                 style="width: {{ gpu.temperature }}%"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            {% endif %}
+                        {% endfor %}
+                    </div>
+
+                    <div class="mt-3 text-center">
+                        <button class="btn btn-outline-custom btn-sm" onclick="forceCleanupGPUs()">
+                            <i class="fas fa-broom me-1"></i>Force Cleanup
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 </div>
 
+<!-- Keep all existing modals (they remain the same) -->
 <!-- Load Model Modal -->
 <div class="modal fade" id="loadModelModal" tabindex="-1">
     <div class="modal-dialog modal-lg">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title">Load Model</h5>
+                <div>
+                    <h5 class="modal-title">Load New Model</h5>
+                    <small class="text-muted">Configure and load your LLM model</small>
+                </div>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
                 <form id="loadModelForm">
                     {% csrf_token %}
-                    <div class="mb-3">
-                        <label class="form-label">Model Name</label>
-                        <input type="text" class="form-control" id="modelName" required>
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Model Name</label>
+                            <input type="text" class="form-control" id="modelName" required placeholder="Enter model name">
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">GPUs to Use</label>
+                            <select class="form-control" id="tensorParallelSize">
+                                <option value="1">1 GPU</option>
+                                {% for i in "12345678"|make_list %}
+                                    {% if forloop.counter <= gpu_count %}
+                                        <option value="{{ forloop.counter }}">{{ forloop.counter }} GPUs</option>
+                                    {% endif %}
+                                {% endfor %}
+                            </select>
+                        </div>
                     </div>
+
                     <div class="mb-3">
                         <label class="form-label">Model Path</label>
                         <div class="input-group">
-                            <input type="text" class="form-control" id="modelPath" required readonly>
-                            <button type="button" class="btn btn-outline-secondary" onclick="showFileBrowser()">
-                                <i class="fas fa-folder-open"></i> Browse
+                            <input type="text" class="form-control" id="modelPath" required readonly placeholder="Click Browse to select directory">
+                            <button type="button" class="btn btn-outline-primary" onclick="showFileBrowser()">
+                                <i class="fas fa-folder-open me-1"></i>Browse
                             </button>
                         </div>
-                        <small class="form-text text-muted">Click Browse to select the model directory</small>
                     </div>
-                    <div class="mb-3">
-                        <label class="form-label">GPUs to Use (Tensor Parallel Size)</label>
-                        <select class="form-control" id="tensorParallelSize">
-                            <option value="1">1 GPU</option>
-                            {% for i in "12345678"|make_list %}
-                                {% if forloop.counter <= gpu_count %}
-                                    <option value="{{ forloop.counter }}">{{ forloop.counter }} GPUs</option>
-                                {% endif %}
-                            {% endfor %}
-                        </select>
+
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">GPU Memory Utilization</label>
+                            <select class="form-control" id="gpuMemoryUtilization">
+                                <option value="0.7">70%</option>
+                                <option value="0.8">80%</option>
+                                <option value="0.9" selected>90%</option>
+                                <option value="0.95">95%</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Max Tokens</label>
+                            <input type="number" class="form-control" id="maxTokens" value="2048" placeholder="2048">
+                        </div>
                     </div>
-                    <div class="mb-3">
-                        <label class="form-label">GPU Memory Utilization</label>
-                        <select class="form-control" id="gpuMemoryUtilization">
-                            <option value="0.7">70%</option>
-                            <option value="0.8">80%</option>
-                            <option value="0.9" selected>90%</option>
-                            <option value="0.95">95%</option>
-                        </select>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">Max Tokens</label>
-                        <input type="number" class="form-control" id="maxTokens" value="2048">
-                    </div>
+
                     <div class="mb-3">
                         <label class="form-label">Data Type</label>
                         <select class="form-control" id="dtype">
@@ -307,13 +776,15 @@
                             <option value="bfloat16">BFloat16</option>
                             <option value="float32">Float32</option>
                         </select>
-                        <small class="form-text text-muted">Data type for model weights (float16 recommended for memory efficiency)</small>
+                        <small class="form-text text-muted">Float16 recommended for memory efficiency</small>
                     </div>
                 </form>
             </div>
             <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                <button type="button" class="btn btn-primary" onclick="loadModel()">Load Model</button>
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" onclick="loadModel()">
+                    <i class="fas fa-rocket me-2"></i>Load Model
+                </button>
             </div>
         </div>
     </div>
@@ -324,20 +795,23 @@
     <div class="modal-dialog modal-lg">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title">Select Model Directory</h5>
+                <div>
+                    <h5 class="modal-title">Select Model Directory</h5>
+                    <small class="text-muted">Browse and select your model files</small>
+                </div>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
                 <div class="mb-3">
                     <div class="d-flex align-items-center mb-2">
-                        <span class="me-2">Current Path:</span>
-                        <code id="currentPath" class="flex-grow-1"></code>
-                        <button type="button" class="btn btn-sm btn-outline-secondary ms-2" onclick="refreshDirectory()">
+                        <span class="me-2 text-muted">Current Path:</span>
+                        <code id="currentPath" class="flex-grow-1 bg-light p-2 rounded"></code>
+                        <button type="button" class="btn btn-sm btn-outline-primary ms-2" onclick="refreshDirectory()">
                             <i class="fas fa-refresh"></i>
                         </button>
                     </div>
                 </div>
-                <div class="border" style="height: 400px; overflow-y: auto;">
+                <div class="border rounded" style="height: 400px; overflow-y: auto;">
                     <div class="list-group list-group-flush" id="directoryList">
                         <div class="text-center p-4">
                             <i class="fas fa-spinner fa-spin"></i> Loading...
@@ -346,9 +820,8 @@
                 </div>
                 <div class="mt-3">
                     <div class="alert alert-info">
-                        <i class="fas fa-info-circle"></i>
-                        <strong>Model directories</strong> are highlighted in green and show a <span class="badge bg-success">Model</span> badge.
-                        Click a directory to select it.
+                        <i class="fas fa-info-circle me-2"></i>
+                        <strong>Model directories</strong> are highlighted and show a <span class="badge bg-success">Model</span> badge.
                     </div>
                 </div>
             </div>
@@ -357,9 +830,9 @@
                     <span class="text-muted">Selected: </span>
                     <code id="selectedPath">None</code>
                 </div>
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
                 <button type="button" class="btn btn-primary" onclick="selectDirectory()" id="selectButton" disabled>
-                    Select Directory
+                    <i class="fas fa-check me-2"></i>Select Directory
                 </button>
             </div>
         </div>
@@ -371,13 +844,16 @@
     <div class="modal-dialog modal-lg">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title">Test Model</h5>
+                <div>
+                    <h5 class="modal-title">Test Model</h5>
+                    <small class="text-muted">Generate text and test model performance</small>
+                </div>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
                 <div class="mb-3">
                     <label class="form-label">Prompt</label>
-                    <textarea class="form-control" id="testPrompt" rows="4" placeholder="Enter your prompt here..."></textarea>
+                    <textarea class="form-control" id="testPrompt" rows="4" placeholder="Enter your prompt here..." style="resize: vertical;"></textarea>
                 </div>
                 <div class="row">
                     <div class="col-md-4">
@@ -394,13 +870,15 @@
                     </div>
                 </div>
                 <div class="mt-3">
-                    <button class="btn btn-primary" onclick="testModel()">Generate</button>
+                    <button class="btn btn-primary" onclick="testModel()">
+                        <i class="fas fa-play me-2"></i>Generate
+                    </button>
                 </div>
                 <div class="mt-3" id="testResult" style="display: none;">
                     <label class="form-label">Response</label>
                     <div class="card">
-                        <div class="card-body">
-                            <div id="testResponse"></div>
+                        <div class="card-body bg-light">
+                            <div id="testResponse" style="white-space: pre-wrap; font-family: monospace;"></div>
                         </div>
                     </div>
                 </div>
@@ -409,49 +887,47 @@
     </div>
 </div>
 
-<!-- FIXED: Loading Logs Modal -->
-<div class="modal fade" id="loadingLogsModal" tabindex="-1" aria-labelledby="loadingLogsModalLabel" aria-hidden="true">
+<!-- Loading Logs Modal -->
+<div class="modal fade" id="loadingLogsModal" tabindex="-1">
     <div class="modal-dialog modal-xl">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title" id="loadingLogsModalLabel">
-                    <i class="fas fa-file-alt"></i> Loading Logs
-                    <span id="logModalStatus" class="badge ms-2"></span>
-                </h5>
+                <div>
+                    <h5 class="modal-title">
+                        <i class="fas fa-file-alt me-2"></i>Loading Logs
+                        <span id="logModalStatus" class="badge ms-2"></span>
+                    </h5>
+                    <small class="text-muted">Model: <strong id="logModalModelName"></strong></small>
+                </div>
                 <div class="d-flex gap-2">
-                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="refreshLogs()">
-                        <i class="fas fa-sync-alt"></i> Refresh
+                    <button type="button" class="btn btn-sm btn-outline-primary" onclick="refreshLogs()">
+                        <i class="fas fa-sync-alt me-1"></i>Refresh
                     </button>
-                    <button type="button" class="btn btn-sm btn-outline-primary" onclick="downloadLogs()">
-                        <i class="fas fa-download"></i> Download
+                    <button type="button" class="btn btn-sm btn-outline-success" onclick="downloadLogs()">
+                        <i class="fas fa-download me-1"></i>Download
                     </button>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                 </div>
             </div>
             <div class="modal-body">
-                <div class="mb-3">
-                    <div class="d-flex justify-content-between align-items-center">
-                        <span>Model: <strong id="logModalModelName"></strong></span>
-                        <span>Last Updated: <span id="logModalLastUpdated"></span></span>
-                    </div>
-                </div>
                 <div class="card">
-                    <div class="card-body p-2">
-                        <pre id="loadingLogsContent" class="bg-dark text-light p-3 mb-0" style="height: 500px; overflow-y: auto; font-family: monospace; font-size: 12px; white-space: pre-wrap;"></pre>
+                    <div class="card-body p-0">
+                        <pre id="loadingLogsContent" class="bg-dark text-light p-3 mb-0" style="height: 500px; overflow-y: auto; font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace; font-size: 13px; white-space: pre-wrap; border-radius: 0.375rem;"></pre>
                     </div>
                 </div>
-                <div class="mt-2">
+                <div class="mt-3 d-flex justify-content-between align-items-center">
                     <div class="form-check">
                         <input class="form-check-input" type="checkbox" id="autoScrollLogs" checked>
                         <label class="form-check-label" for="autoScrollLogs">
                             Auto-scroll to bottom
                         </label>
                     </div>
+                    <small class="text-muted">Last Updated: <span id="logModalLastUpdated"></span></small>
                 </div>
             </div>
             <div class="modal-footer">
-                <button type="button" class="btn btn-outline-secondary" onclick="clearLogs()">
-                    <i class="fas fa-trash"></i> Clear Logs
+                <button type="button" class="btn btn-outline-danger" onclick="clearLogs()">
+                    <i class="fas fa-trash me-2"></i>Clear Logs
                 </button>
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
             </div>
@@ -467,29 +943,193 @@
     let selectedDirectoryPath = '';
     let currentModelId = null;
     let logsRefreshInterval = null;
+    let gpuStatsInterval = null;
 
-    // CSRF token helper
+    // Initialize auto-refresh when page loads
+    document.addEventListener('DOMContentLoaded', function() {
+        // Start GPU stats auto-refresh
+        startGPUAutoRefresh();
+
+        // Set up auto-refresh toggle
+        const autoRefreshToggle = document.getElementById('autoRefreshToggle');
+        if (autoRefreshToggle) {
+            autoRefreshToggle.addEventListener('change', function() {
+                if (this.checked) {
+                    startGPUAutoRefresh();
+                } else {
+                    stopGPUAutoRefresh();
+                }
+            });
+        }
+    });
+
+    // GPU Auto-refresh functions
+    function startGPUAutoRefresh() {
+        // Clear existing interval if any
+        stopGPUAutoRefresh();
+
+        // Start new interval - refresh every 5 seconds
+        gpuStatsInterval = setInterval(() => {
+            refreshGPUStats(false); // false = silent refresh (no loading indicators)
+        }, 1000);
+
+        console.log('GPU auto-refresh started (every 5 seconds)');
+    }
+
+    function stopGPUAutoRefresh() {
+        if (gpuStatsInterval) {
+            clearInterval(gpuStatsInterval);
+            gpuStatsInterval = null;
+            console.log('GPU auto-refresh stopped');
+        }
+    }
+
+    // Enhanced GPU stats refresh function
+    function refreshGPUStats(manual = false) {
+        const refreshButton = document.getElementById('refresh-button');
+
+        // Show loading indicator only for manual refresh
+        if (manual && refreshButton) {
+            refreshButton.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+            refreshButton.disabled = true;
+        }
+
+        fetch('/llm-dashboard/api/gpu-stats/')
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    updateGPUStatsDisplay(data);
+                } else {
+                    console.error('Failed to fetch GPU stats:', data.error);
+                    if (manual) {
+                        showAlert('Failed to refresh GPU stats: ' + data.error, 'danger');
+                    }
+                }
+            })
+            .catch(error => {
+                console.error('Error fetching GPU stats:', error);
+                if (manual) {
+                    showAlert('Error fetching GPU stats: ' + error.message, 'danger');
+                }
+            })
+            .finally(() => {
+                // Reset refresh button only for manual refresh
+                if (manual && refreshButton) {
+                    refreshButton.innerHTML = '<i class="fas fa-sync-alt"></i>';
+                    refreshButton.disabled = false;
+                }
+            });
+    }
+
+    function updateGPUStatsDisplay(data) {
+        // Update GPU count and timestamp
+        const gpuCountElement = document.getElementById('gpu-count');
+        const lastUpdatedElement = document.getElementById('gpu-last-updated');
+
+        if (gpuCountElement) {
+            gpuCountElement.textContent = data.gpu_count;
+        }
+
+        if (lastUpdatedElement) {
+            const now = new Date();
+            lastUpdatedElement.textContent = now.toLocaleTimeString();
+        }
+
+        // Update each GPU card
+        data.gpu_stats.forEach(gpu => {
+            if (gpu.error) {
+                // Handle GPU error case
+                const errorContainer = document.querySelector('.alert-warning');
+                if (errorContainer) {
+                    errorContainer.innerHTML = `
+                        <i class="fas fa-exclamation-triangle me-2"></i>
+                        Unable to fetch GPU stats: ${gpu.error}
+                    `;
+                }
+                return;
+            }
+
+            const gpuCard = document.querySelector(`[data-gpu-id="${gpu.id}"]`);
+            if (!gpuCard) return;
+
+            // Update memory usage
+            const memoryPercentage = gpuCard.querySelector('.memory-percentage');
+            const memoryProgress = gpuCard.querySelector('.memory-progress');
+            const memoryDetails = gpuCard.querySelector('.memory-details');
+
+            if (memoryPercentage) memoryPercentage.textContent = gpu.memory_percentage + '%';
+            if (memoryDetails) memoryDetails.textContent = `${gpu.memory_used.toFixed(1)} / ${gpu.memory_total.toFixed(1)} GB`;
+
+            if (memoryProgress) {
+                memoryProgress.style.width = gpu.memory_percentage + '%';
+                // Update color based on usage
+                memoryProgress.className = `progress-fill memory-progress ${
+                    gpu.memory_percentage > 90 ? 'danger' :
+                    gpu.memory_percentage > 70 ? 'warning' : 'success'
+                }`;
+            }
+
+            // Update GPU utilization
+            const gpuUtilization = gpuCard.querySelector('.gpu-utilization');
+            const utilizationProgress = gpuCard.querySelector('.utilization-progress');
+
+            if (gpuUtilization) gpuUtilization.textContent = gpu.gpu_utilization + '%';
+
+            if (utilizationProgress) {
+                utilizationProgress.style.width = gpu.gpu_utilization + '%';
+                utilizationProgress.className = `progress-fill utilization-progress ${
+                    gpu.gpu_utilization > 90 ? 'danger' :
+                    gpu.gpu_utilization > 70 ? 'warning' : 'success'
+                }`;
+            }
+
+            // Update temperature
+            const temperature = gpuCard.querySelector('.temperature');
+            const temperatureProgress = gpuCard.querySelector('.temperature-progress');
+
+            if (temperature) temperature.textContent = gpu.temperature + '°C';
+
+            if (temperatureProgress) {
+                temperatureProgress.style.width = gpu.temperature + '%';
+                temperatureProgress.className = `progress-fill temperature-progress ${
+                    gpu.temperature > 80 ? 'danger' :
+                    gpu.temperature > 60 ? 'warning' : 'success'
+                }`;
+            }
+        });
+    }
+
+    // Keep all existing JavaScript functions (they remain the same)
+    function showAlert(message, type = 'info') {
+        const alertDiv = document.createElement('div');
+        alertDiv.className = `alert alert-${type} alert-dismissible fade show position-fixed`;
+        alertDiv.style.cssText = 'top: 20px; right: 20px; z-index: 9999; max-width: 400px;';
+        alertDiv.innerHTML = `
+            ${message}
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        `;
+
+        document.body.appendChild(alertDiv);
+
+        setTimeout(() => {
+            if (alertDiv.parentNode) {
+                alertDiv.remove();
+            }
+        }, 5000);
+    }
+
     function getCsrfToken() {
         return document.querySelector('[name=csrfmiddlewaretoken]').value;
     }
 
-    // FIXED: Enhanced logs modal functionality
     function showLoadingLogsModal(modelId) {
         currentModelId = modelId;
-
-        // Show the modal
         const modal = new bootstrap.Modal(document.getElementById('loadingLogsModal'));
         modal.show();
-
-        // Load initial logs
         refreshLogs();
-
-        // Set up auto-refresh for active loading
         if (logsRefreshInterval) {
             clearInterval(logsRefreshInterval);
         }
-
-        // Auto-refresh every 2 seconds if model is still loading
         logsRefreshInterval = setInterval(() => {
             refreshLogs();
         }, 2000);
@@ -497,8 +1137,6 @@
 
     function refreshLogs() {
         if (!currentModelId) return;
-
-        // FIXED: Use correct URL with hyphen
         fetch(`/llm-dashboard/api/model/${currentModelId}/logs/`)
             .then(response => response.json())
             .then(data => {
@@ -506,22 +1144,17 @@
                     updateLogsDisplay(data);
                 } else {
                     console.error('Failed to fetch logs:', data.error);
-                    // Fallback to old endpoint if new one doesn't exist
                     fetchLoadingLogsOld();
                 }
             })
             .catch(error => {
                 console.error('Error fetching logs:', error);
-                // Fallback to old endpoint
                 fetchLoadingLogsOld();
             });
     }
 
-    // Fallback function for existing endpoint
     function fetchLoadingLogsOld() {
         if (!currentModelId) return;
-
-        // FIXED: Use correct URL with hyphen
         fetch(`/llm-dashboard/get-logs/${currentModelId}/`)
             .then(response => response.json())
             .then(data => {
@@ -530,7 +1163,6 @@
                     document.getElementById('logModalStatus').textContent = 'Error';
                     document.getElementById('logModalStatus').className = 'badge ms-2 bg-danger';
                 } else {
-                    // Convert old format to new format
                     const convertedData = {
                         logs: data.logs || 'No logs available',
                         status: data.status,
@@ -551,24 +1183,19 @@
         const lastUpdated = document.getElementById('logModalLastUpdated');
         const status = document.getElementById('logModalStatus');
 
-        // Update content
         modelName.textContent = data.model_name || 'Unknown Model';
         lastUpdated.textContent = new Date().toLocaleString();
 
-        // Update status badge
         status.textContent = data.status;
         status.className = `badge ms-2 ${getStatusBadgeClass(data.status)}`;
 
-        // Update logs content
         logsContent.textContent = data.logs || 'No logs available';
 
-        // Auto-scroll to bottom if enabled
         const autoScroll = document.getElementById('autoScrollLogs');
         if (autoScroll && autoScroll.checked) {
             logsContent.scrollTop = logsContent.scrollHeight;
         }
 
-        // Stop auto-refresh if model is no longer loading
         if (data.status !== 'LOADING' && logsRefreshInterval) {
             clearInterval(logsRefreshInterval);
             logsRefreshInterval = null;
@@ -587,7 +1214,6 @@
     function downloadLogs() {
         const logsContent = document.getElementById('loadingLogsContent').textContent;
         const modelName = document.getElementById('logModalModelName').textContent;
-
         const blob = new Blob([logsContent], { type: 'text/plain' });
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -601,7 +1227,6 @@
 
     function clearLogs() {
         if (!currentModelId) return;
-
         if (confirm('Are you sure you want to clear all logs for this model?')) {
             fetch(`/llm-dashboard/api/model/${currentModelId}/clear-logs/`, {
                 method: 'POST',
@@ -609,16 +1234,13 @@
                     'X-CSRFToken': getCsrfToken(),
                     'Content-Type': 'application/json',
                 },
-                // FIXED: Include the required confirmation parameter
-                body: JSON.stringify({
-                    confirm: true
-                })
+                body: JSON.stringify({ confirm: true })
             })
             .then(response => response.json())
             .then(data => {
                 if (data.success) {
                     showAlert('Logs cleared successfully', 'success');
-                    refreshLogs(); // Refresh to show empty logs
+                    refreshLogs();
                 } else {
                     showAlert('Failed to clear logs: ' + (data.error || 'Unknown error'), 'danger');
                 }
@@ -630,19 +1252,8 @@
         }
     }
 
-
-    // Clean up intervals when modal is closed
-    document.getElementById('loadingLogsModal').addEventListener('hidden.bs.modal', function () {
-        if (logsRefreshInterval) {
-            clearInterval(logsRefreshInterval);
-            logsRefreshInterval = null;
-        }
-        currentModelId = null;
-    });
-
     function stopLoading(modelId) {
         if (confirm('Are you sure you want to stop loading this model?')) {
-            // FIXED: Use correct URL with hyphen, not underscore
             fetch(`/llm-dashboard/stop-loading/${modelId}/`, {
                 method: 'POST',
                 headers: {
@@ -651,7 +1262,6 @@
                 }
             })
             .then(response => {
-                // Check if response is ok before parsing JSON
                 if (!response.ok) {
                     throw new Error(`HTTP error! status: ${response.status}`);
                 }
@@ -660,7 +1270,6 @@
             .then(data => {
                 if (data.success) {
                     showAlert('Model loading stopped successfully', 'success');
-                    // Refresh page to show updated status
                     setTimeout(() => {
                         window.location.reload();
                     }, 1000);
@@ -675,9 +1284,116 @@
         }
     }
 
+    function showLoadModelDialog() {
+        new bootstrap.Modal(document.getElementById('loadModelModal')).show();
+    }
 
+    function showTestDialog() {
+        new bootstrap.Modal(document.getElementById('testModelModal')).show();
+    }
 
-    // File browser functionality
+    function loadModel() {
+        const formData = {
+            name: document.getElementById('modelName').value,
+            model_path: document.getElementById('modelPath').value,
+            tensor_parallel_size: parseInt(document.getElementById('tensorParallelSize').value),
+            gpu_memory_utilization: parseFloat(document.getElementById('gpuMemoryUtilization').value),
+            max_tokens: parseInt(document.getElementById('maxTokens').value),
+            dtype: document.getElementById('dtype').value
+        };
+
+        if (!formData.name || !formData.model_path) {
+            showAlert('Please fill in all required fields', 'warning');
+            return;
+        }
+
+        fetch('/llm-dashboard/load-model/', {
+            method: 'POST',
+            headers: {
+                'X-CSRFToken': getCsrfToken(),
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(formData)
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                showAlert('Model loading started successfully', 'success');
+                bootstrap.Modal.getInstance(document.getElementById('loadModelModal')).hide();
+                setTimeout(() => window.location.reload(), 1000);
+            } else {
+                showAlert('Failed to load model: ' + (data.error || 'Unknown error'), 'danger');
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            showAlert('Error loading model: ' + error.message, 'danger');
+        });
+    }
+
+    function unloadModel(modelId) {
+        if (confirm('Are you sure you want to unload this model?')) {
+            fetch(`/llm-dashboard/unload-model/${modelId}/`, {
+                method: 'POST',
+                headers: {
+                    'X-CSRFToken': getCsrfToken(),
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    showAlert('Model unloaded successfully', 'success');
+                    setTimeout(() => window.location.reload(), 1000);
+                } else {
+                    showAlert('Failed to unload model: ' + (data.error || 'Unknown error'), 'danger');
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                showAlert('Error unloading model: ' + error.message, 'danger');
+            });
+        }
+    }
+
+    function testModel() {
+        const prompt = document.getElementById('testPrompt').value;
+        if (!prompt.trim()) {
+            showAlert('Please enter a prompt', 'warning');
+            return;
+        }
+
+        const testData = {
+            prompt: prompt,
+            temperature: parseFloat(document.getElementById('testTemperature').value),
+            top_p: parseFloat(document.getElementById('testTopP').value),
+            max_tokens: parseInt(document.getElementById('testMaxTokens').value)
+        };
+
+        document.getElementById('testResult').style.display = 'block';
+        document.getElementById('testResponse').textContent = 'Generating response...';
+
+        fetch('/llm-dashboard/test-model/', {
+            method: 'POST',
+            headers: {
+                'X-CSRFToken': getCsrfToken(),
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(testData)
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                document.getElementById('testResponse').textContent = data.response;
+            } else {
+                document.getElementById('testResponse').textContent = 'Error: ' + (data.error || 'Unknown error');
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            document.getElementById('testResponse').textContent = 'Error: ' + error.message;
+        });
+    }
+
     function showFileBrowser() {
         new bootstrap.Modal(document.getElementById('fileBrowserModal')).show();
         browseDirectory('');
@@ -793,361 +1509,46 @@
         }
     }
 
-    // GPU stats refresh
-    function refreshGPUStats() {
-        const button = document.getElementById('refresh-button');
-        const icon = button.querySelector('i');
-
-        icon.classList.add('fa-spin');
-        button.disabled = true;
-
-        fetch('/llm-dashboard/stats/')
-            .then(response => response.json())
-            .then(data => {
-                if (data.gpu_stats) {
-                    updateGPUStats(data.gpu_stats);
-                }
-            })
-            .catch(error => {
-                console.error('Error refreshing GPU stats:', error);
-            })
-            .finally(() => {
-                icon.classList.remove('fa-spin');
-                button.disabled = false;
-            });
-    }
-
-    function updateGPUStats(gpuStats) {
-        const container = document.getElementById('gpu-stats-content');
-        if (!container || !gpuStats) return;
-
-        let html = '';
-        gpuStats.forEach(gpu => {
-            if (gpu.error) {
-                html += `
-                    <div class="col-12">
-                        <div class="alert alert-warning">
-                            Unable to fetch GPU stats: ${gpu.error}
-                        </div>
-                    </div>
-                `;
-            } else {
-                const memoryColor = gpu.memory_percentage > 90 ? 'bg-danger' :
-                                   gpu.memory_percentage > 70 ? 'bg-warning' : 'bg-success';
-                const gpuColor = gpu.gpu_utilization > 90 ? 'bg-danger' :
-                                gpu.gpu_utilization > 70 ? 'bg-warning' : 'bg-success';
-                const tempColor = gpu.temperature > 80 ? 'bg-danger' :
-                                 gpu.temperature > 60 ? 'bg-warning' : 'bg-success';
-
-                html += `
-                    <div class="col-md-6 col-xl-4 mb-4">
-                        <div class="card h-100">
-                            <div class="card-header">
-                                <h6 class="card-title mb-0">${gpu.name} (GPU ${gpu.id})</h6>
-                            </div>
-                            <div class="card-body">
-                                <div class="mb-3">
-                                    <label class="form-label">Memory Usage</label>
-                                    <div class="progress" style="height: 20px;">
-                                        <div class="progress-bar ${memoryColor}"
-                                             role="progressbar"
-                                             style="width: ${gpu.memory_percentage}%">
-                                            ${gpu.memory_percentage}%
-                                        </div>
-                                    </div>
-                                    <small class="text-muted">
-                                        Used: ${gpu.memory_used.toFixed(1)} GB /
-                                        Total: ${gpu.memory_total.toFixed(1)} GB
-                                    </small>
-                                </div>
-                                <div class="mb-3">
-                                    <label class="form-label">GPU Utilization</label>
-                                    <div class="progress" style="height: 20px;">
-                                        <div class="progress-bar ${gpuColor}"
-                                             role="progressbar"
-                                             style="width: ${gpu.gpu_utilization}%">
-                                            ${gpu.gpu_utilization}%
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="mb-3">
-                                    <label class="form-label">Temperature</label>
-                                    <div class="progress" style="height: 20px;">
-                                        <div class="progress-bar ${tempColor}"
-                                             role="progressbar"
-                                             style="width: ${gpu.temperature}%">
-                                            ${gpu.temperature}°C
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                `;
-            }
-        });
-
-        container.innerHTML = html;
-    }
-
-    // Model management functions
-    function showLoadModelDialog() {
-        new bootstrap.Modal(document.getElementById('loadModelModal')).show();
-    }
-
-    function showTestDialog() {
-        new bootstrap.Modal(document.getElementById('testModelModal')).show();
-    }
-
-    function loadModel() {
-        const modelPath = document.getElementById('modelPath').value;
-        const modelName = document.getElementById('modelName').value;
-        const tensorParallelSize = document.getElementById('tensorParallelSize').value;
-        const gpuMemoryUtilization = document.getElementById('gpuMemoryUtilization').value;
-        const maxTokens = document.getElementById('maxTokens').value;
-        const dtype = document.getElementById('dtype').value;
-
-        if (!modelPath || !modelName) {
-            alert('Please fill in all required fields');
-            return;
-        }
-
-        const loadButton = event.target;
-        loadButton.disabled = true;
-        loadButton.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Loading...';
-
-        const data = {
-            name: modelName,
-            model_path: modelPath,
-            tensor_parallel_size: parseInt(tensorParallelSize),
-            gpu_memory_utilization: parseFloat(gpuMemoryUtilization),
-            max_tokens: parseInt(maxTokens),
-            dtype: dtype
-        };
-
-        fetch('/llm-dashboard/load-model/', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-CSRFToken': getCsrfToken()
-            },
-            body: JSON.stringify(data)
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                bootstrap.Modal.getInstance(document.getElementById('loadModelModal')).hide();
-                location.reload();
-            } else {
-                alert('Error loading model: ' + (data.error || 'Unknown error'));
-            }
-        })
-        .catch(error => {
-            console.error('Error:', error);
-            alert('Error loading model: ' + error.message);
-        })
-        .finally(() => {
-            loadButton.disabled = false;
-            loadButton.innerHTML = 'Load Model';
-        });
-    }
-
     function forceCleanupGPUs() {
-        if (confirm('⚠️ WARNING: This will forcefully terminate ALL vLLM processes and clear GPU memory!\n\nThis action will:\n• Kill all running model processes\n• Clear GPU memory on all devices\n• Reset all model statuses to UNLOADED\n• Stop Ray cluster if running\n\nAre you sure you want to continue?')) {
-
-            const button = document.getElementById('force-cleanup-button');
-            const icon = button.querySelector('i');
-            const originalText = button.innerHTML;
-
-            // Show loading state
-            button.disabled = true;
-            icon.className = 'fas fa-spinner fa-spin';
-            button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Cleaning...';
-
+        if (confirm('This will force cleanup all GPUs and kill all vLLM processes. Are you sure?')) {
             fetch('/llm-dashboard/force-cleanup-gpus/', {
                 method: 'POST',
                 headers: {
                     'X-CSRFToken': getCsrfToken(),
-                    'Content-Type': 'application/json',
                 }
             })
             .then(response => response.json())
             .then(data => {
                 if (data.success) {
-                    showAlert('Force GPU cleanup completed successfully!', 'success');
-
-                    // Show cleanup details if available
-                    if (data.details && data.details.length > 0) {
-                        const detailsText = data.details.join('\n');
-                        console.log('Cleanup details:', detailsText);
-
-                        // Show details in a collapsible alert
-                        const detailsHtml = `
-                            <div class="alert alert-info alert-dismissible fade show mt-2" role="alert">
-                                <strong>Cleanup Details:</strong>
-                                <div class="mt-2">
-                                    <button class="btn btn-sm btn-outline-info" type="button" data-bs-toggle="collapse" data-bs-target="#cleanupDetails" aria-expanded="false">
-                                        Show Details
-                                    </button>
-                                </div>
-                                <div class="collapse mt-2" id="cleanupDetails">
-                                    <pre class="small mb-0">${detailsText}</pre>
-                                </div>
-                                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-                            </div>
-                        `;
-
-                        // Add details to the page
-                        const container = document.querySelector('.container-fluid');
-                        const tempDiv = document.createElement('div');
-                        tempDiv.innerHTML = detailsHtml;
-                        container.insertBefore(tempDiv.firstElementChild, container.firstElementChild);
-                    }
-
-                    // Refresh the page after a short delay to show updated status
-                    setTimeout(() => {
-                        window.location.reload();
-                    }, 2000);
-
+                    showAlert('GPU cleanup completed successfully', 'success');
+                    setTimeout(() => window.location.reload(), 2000);
                 } else {
-                    showAlert('Force cleanup failed: ' + (data.error || 'Unknown error'), 'danger');
-
-                    // Show error details if available
-                    if (data.details && data.details.length > 0) {
-                        console.error('Cleanup errors:', data.details);
-                    }
+                    showAlert('GPU cleanup failed: ' + (data.error || 'Unknown error'), 'danger');
                 }
             })
             .catch(error => {
-                console.error('Error during force cleanup:', error);
-                showAlert('Error during force cleanup: ' + error.message, 'danger');
-            })
-            .finally(() => {
-                // Restore button state
-                button.disabled = false;
-                button.innerHTML = originalText;
+                console.error('Error:', error);
+                showAlert('Error during GPU cleanup: ' + error.message, 'danger');
             });
         }
     }
 
-    // Helper function to show alerts
-    function showAlert(message, type) {
-        const alertContainer = document.createElement('div');
-        alertContainer.className = `alert alert-${type} alert-dismissible fade show`;
-        alertContainer.innerHTML = `
-            ${message}
-            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-        `;
-
-        // Insert at top of container
-        const container = document.querySelector('.container-fluid');
-        container.insertBefore(alertContainer, container.firstChild);
-
-        // Auto-dismiss after 5 seconds
-        setTimeout(() => {
-            if (alertContainer.parentNode) {
-                alertContainer.remove();
-            }
-        }, 5000);
-    }
-
-    // Add periodic status check for loading models
-    function checkModelStatus() {
-        // Only check if there's a model visible
-        const modelCard = document.querySelector('.card-body h6');
-        if (!modelCard) return;
-
-        // Check if model is in loading state
-        const statusBadge = document.querySelector('.badge');
-        if (statusBadge && statusBadge.textContent.trim() === 'LOADING') {
-            // Refresh page every 10 seconds if model is loading
-            setTimeout(() => {
-                window.location.reload();
-            }, 10000);
+    // Clean up intervals when page unloads
+    window.addEventListener('beforeunload', function() {
+        stopGPUAutoRefresh();
+        if (logsRefreshInterval) {
+            clearInterval(logsRefreshInterval);
+            logsRefreshInterval = null;
         }
-    }
-
-    // Start status checking when page loads
-    document.addEventListener('DOMContentLoaded', function() {
-        checkModelStatus();
     });
 
-
-    function unloadModel(modelId) {
-        if (confirm('Are you sure you want to unload this model?')) {
-            fetch(`/llm-dashboard/unload-model/${modelId}/`, {
-                method: 'POST',
-                headers: {
-                    'X-CSRFToken': getCsrfToken(),
-                    'Content-Type': 'application/json',
-                }
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    showAlert('Model unloaded successfully', 'success');
-                    // Refresh page to update UI
-                    setTimeout(() => {
-                        window.location.reload();
-                    }, 1000);
-                } else {
-                    showAlert('Failed to unload model: ' + (data.error || 'Unknown error'), 'danger');
-                }
-            })
-            .catch(error => {
-                console.error('Error unloading model:', error);
-                showAlert('Error unloading model: ' + error.message, 'danger');
-            });
+    // Clean up intervals when modal is closed
+    document.getElementById('loadingLogsModal').addEventListener('hidden.bs.modal', function () {
+        if (logsRefreshInterval) {
+            clearInterval(logsRefreshInterval);
+            logsRefreshInterval = null;
         }
-    }
-
-    function testModel() {
-        const prompt = document.getElementById('testPrompt').value;
-        const temperature = parseFloat(document.getElementById('testTemperature').value);
-        const topP = parseFloat(document.getElementById('testTopP').value);
-        const maxTokens = parseInt(document.getElementById('testMaxTokens').value);
-
-        if (!prompt.trim()) {
-            alert('Please enter a prompt');
-            return;
-        }
-
-        const generateButton = event.target;
-        generateButton.disabled = true;
-        generateButton.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Generating...';
-
-        const data = {
-            prompt: prompt,
-            temperature: temperature,
-            top_p: topP,
-            max_tokens: maxTokens
-        };
-
-        fetch('/llm-dashboard/test-model/', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-CSRFToken': getCsrfToken()
-            },
-            body: JSON.stringify(data)
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                document.getElementById('testResponse').textContent = data.response;
-                document.getElementById('testResult').style.display = 'block';
-            } else {
-                alert('Error testing model: ' + (data.error || 'Unknown error'));
-            }
-        })
-        .catch(error => {
-            console.error('Error:', error);
-            alert('Error testing model: ' + error.message);
-        })
-        .finally(() => {
-            generateButton.disabled = false;
-            generateButton.innerHTML = 'Generate';
-        });
-    }
+        currentModelId = null;
+    });
 </script>
 {% endblock %}

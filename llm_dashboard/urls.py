@@ -18,6 +18,10 @@ urlpatterns = [
     path('api/model/<int:model_id>/clear-logs/', views.clear_model_logs, name='clear_model_logs'),
     path('force-cleanup-gpus/', views.force_cleanup_all_gpus, name='force_cleanup_gpus'),
 
+    # GPU Stats API
+    path('api/gpu-stats/', views.api_gpu_stats, name='api_gpu_stats'),
+
+
     # RAG endpoints
     path('api/models/<int:model_id>/generate-with-document-rag/', views.generate_with_document_rag, name='generate_with_document_rag'),
     path('api/models/<int:model_id>/documents/', views.list_documents, name='list_documents'),
