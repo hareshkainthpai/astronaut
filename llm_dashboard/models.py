@@ -3,6 +3,7 @@ import json
 import os
 import uuid
 import tiktoken
+from django.utils import timezone
 
 
 class LLMModel(models.Model):
@@ -79,7 +80,8 @@ class LLMModel(models.Model):
 class Document(models.Model):
     """Represents a document that can be chunked and stored in vector store"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    model = models.ForeignKey(LLMModel, on_delete=models.CASCADE, related_name='documents')
+    model = models.ForeignKey(LLMModel, on_delete=models.CASCADE, related_name='documents', null=True,
+                              blank=True)  # Made optional
     title = models.CharField(max_length=200)
     content = models.TextField()
     metadata = models.JSONField(default=dict)  # Store additional metadata
@@ -95,8 +97,18 @@ class Document(models.Model):
         ('sliding', 'Sliding Window'),
     ])
 
+    # Add fields for when model is null
+    filename = models.CharField(max_length=255, null=True, blank=True)
+    file_size = models.BigIntegerField(null=True, blank=True)
+
     def __str__(self):
         return f"{self.title} ({self.id})"
+
+    @property
+    def is_global(self):
+        """Check if this is a global document (not tied to specific model)"""
+        return self.model is None
+
 
 
 class DocumentChunk(models.Model):

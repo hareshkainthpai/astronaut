@@ -1,16 +1,15 @@
+import json
 import subprocess
 import time
 import os
-import signal
 import psutil
 import requests
-import json
-from typing import Dict, Any, Optional
+from typing import Dict
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
 
 from .vector_service.token_aware_vector import TokenAwareVectorService
-from ..models import LLMModel, LLMRequest, Document
+from ..models import LLMModel, LLMRequest
 from .map_reduce_service import MapReduceService
 import logging
 
@@ -150,6 +149,10 @@ class VLLMService:
             # Check if already running
             if self.is_server_running(model):
                 self._append_log(model, "⚠️ Server already running")
+                # Update memory usage even if already running
+                model.memory_usage = self._calculate_gpu_memory_usage(model)
+                model.status = 'LOADED'
+                model.save()
                 return True
 
             # Update model status
@@ -196,13 +199,23 @@ class VLLMService:
             self._append_log(model, f"🔄 Process started with PID: {process.pid}")
 
             # Monitor process output in background
-            self._monitor_process_output(model, process)
+            import threading
+            monitor_thread = threading.Thread(
+                target=self._monitor_process_output,
+                args=(model, process)
+            )
+            monitor_thread.daemon = True
+            monitor_thread.start()
 
             # Wait for server to be ready
             if self._wait_for_server_ready(model):
+                # Calculate and update memory usage
+                memory_usage = self._calculate_gpu_memory_usage(model)
+                model.memory_usage = memory_usage
                 model.status = 'LOADED'
                 model.save()
-                self._append_log(model, "✅ Server is ready and responding!")
+
+                self._append_log(model, f"✅ Server ready! Memory usage: {memory_usage:.2f} GB")
                 return True
             else:
                 model.status = 'ERROR'
@@ -237,6 +250,9 @@ class VLLMService:
             try:
                 response = requests.get(f'http://localhost:{model.vllm_port}/health', timeout=5)
                 if response.status_code == 200:
+                    # Update model status immediately when server is ready
+                    model.status = 'LOADED'
+                    model.save()
                     return True
             except:
                 pass
@@ -247,6 +263,26 @@ class VLLMService:
 
         self._append_log(model, "❌ Server did not become ready within timeout")
         return False
+
+    def _calculate_gpu_memory_usage(self, model: LLMModel) -> float:
+        """Calculate actual GPU memory usage for the model"""
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+
+            total_memory_used = 0
+            device_count = pynvml.nvmlDeviceGetCount()
+
+            for i in range(min(device_count, model.tensor_parallel_size)):
+                handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                total_memory_used += info.used
+
+            # Convert to GB
+            return total_memory_used / (1024 ** 3)
+        except Exception as e:
+            self._append_log(model, f"Warning: Could not calculate memory usage: {e}")
+            return 0.0
 
     def stop_vllm_server(self, model: LLMModel):
         """Stop vLLM server for the given model"""
@@ -398,6 +434,95 @@ class VLLMService:
 
         except Exception as e:
             logger.error(f"Error generating text: {e}")
+            raise
+
+    def get_active_model(self):
+        """Get the currently active/loaded model"""
+        try:
+            # Find the model that is currently loaded
+            active_model = LLMModel.objects.filter(status='LOADED').first()
+
+            if active_model and self.is_server_running(active_model):
+                return active_model
+
+            # If no loaded model found or server not running, return None
+            return None
+        except Exception as e:
+            logger.error(f"Error getting active model: {e}")
+            return None
+
+    async def generate_streaming_text(self, model: LLMModel, prompt: str, max_tokens: int = 100,
+                                      temperature: float = 0.7, top_p: float = 0.9):
+        """Generate streaming text using the loaded model"""
+        try:
+            if not self.is_server_running(model):
+                raise Exception("Model server is not running")
+
+            # Prepare request for streaming
+            data = {
+                "model": model.model_path,
+                "prompt": prompt,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "top_p": top_p,
+                "stream": True,  # Enable streaming
+                "stop": None
+            }
+
+            # Make streaming request
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                        f'http://localhost:{model.vllm_port}/v1/completions',
+                        json=data,
+                        timeout=aiohttp.ClientTimeout(total=300)
+                ) as response:
+
+                    if response.status != 200:
+                        raise Exception(f"API request failed: {response.status}")
+
+                    total_tokens = 0
+                    async for line in response.content:
+                        line = line.decode('utf-8').strip()
+
+                        # Skip empty lines and non-data lines
+                        if not line or not line.startswith('data: '):
+                            continue
+
+                        # Parse SSE data
+                        data_content = line[6:]  # Remove 'data: ' prefix
+
+                        # Check for end of stream
+                        if data_content == '[DONE]':
+                            yield {
+                                'token': '',
+                                'is_final': True,
+                                'total_tokens': total_tokens
+                            }
+                            break
+
+                        try:
+                            # Parse JSON data
+                            token_data = json.loads(data_content)
+
+                            # Extract token from response
+                            choices = token_data.get('choices', [])
+                            if choices:
+                                token = choices[0].get('text', '')
+                                total_tokens += 1
+
+                                yield {
+                                    'token': token,
+                                    'is_final': False,
+                                    'total_tokens': total_tokens
+                                }
+
+                        except json.JSONDecodeError:
+                            # Skip malformed JSON
+                            continue
+
+        except Exception as e:
+            logger.error(f"Error in streaming generation: {e}")
             raise
 
     def generate_text_with_smart_rag(self, model: LLMModel, prompt: str,

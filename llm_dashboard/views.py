@@ -1,9 +1,12 @@
+import asyncio
+
 from django.views.generic import TemplateView
-from django.http import JsonResponse
+from django.http import JsonResponse, HttpResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
-from .models import LLMModel, LLMRequest, Document
+from .models import LLMModel, LLMRequest, Document, DocumentChunk
+from .services.vector_service.document_vector import DocumentVectorStoreService
 from .services.vector_service.token_aware_vector import TokenAwareVectorService
 from .services.vllm_service import vllm_service
 from django.utils import timezone
@@ -738,9 +741,20 @@ def model_stats(request):
             'gpu_stats': gpu_stats
         })
 
-    # Check if server is actually running
+    # Check if server is actually running and update status accordingly
     if model.status == 'LOADED' and not vllm_service.is_server_running(model):
         model.status = 'ERROR'
+        model.memory_usage = 0.0
+        model.save()
+    elif model.status == 'LOADING' and vllm_service.is_server_running(model):
+        # Server is ready but status wasn't updated
+        model.status = 'LOADED'
+        # Calculate memory usage
+        try:
+            memory_usage = vllm_service._calculate_gpu_memory_usage(model)
+            model.memory_usage = memory_usage
+        except:
+            model.memory_usage = 0.0
         model.save()
 
     return JsonResponse({
@@ -752,6 +766,47 @@ def model_stats(request):
         'tensor_parallel_size': model.tensor_parallel_size,
         'model_size_gb': model.get_model_size_gb()
     })
+
+
+def refresh_model_status(request):
+    """Manually refresh model status and memory usage"""
+    if request.method == 'POST':
+        try:
+            model = LLMModel.objects.first()
+            if not model:
+                return JsonResponse({'success': False, 'error': 'No model found'})
+
+            # Check if server is actually running
+            if vllm_service.is_server_running(model):
+                model.status = 'LOADED'
+                # Calculate memory usage
+                try:
+                    memory_usage = vllm_service._calculate_gpu_memory_usage(model)
+                    model.memory_usage = memory_usage
+                except:
+                    model.memory_usage = 0.0
+                model.save()
+
+                return JsonResponse({
+                    'success': True,
+                    'status': model.status,
+                    'memory_usage': model.memory_usage
+                })
+            else:
+                model.status = 'ERROR'
+                model.memory_usage = 0.0
+                model.save()
+
+                return JsonResponse({
+                    'success': False,
+                    'error': 'Server not responding',
+                    'status': model.status
+                })
+
+        except Exception as e:
+            return JsonResponse({'success': False, 'error': str(e)})
+
+    return JsonResponse({'success': False, 'error': 'Invalid request method'})
 
 
 @csrf_exempt
@@ -967,3 +1022,559 @@ def export_request_data(request, request_id):
             'success': False,
             'error': str(e)
         }, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def generate_streaming_text(request):
+    """HTTP endpoint for streaming text generation - uses active model"""
+    try:
+        # Parse request data
+        data = json.loads(request.body)
+        prompt = data.get('prompt')
+        max_tokens = data.get('max_tokens', 100)
+        temperature = data.get('temperature', 0.7)
+        top_p = data.get('top_p', 0.9)
+
+        # Validate parameters
+        if not prompt:
+            return JsonResponse({
+                'error': 'Missing prompt'
+            }, status=400)
+
+        # Get active model automatically
+        model = vllm_service.get_active_model()
+        if not model:
+            return JsonResponse({
+                'error': 'No active model found. Please load a model first.'
+            }, status=404)
+
+        # Create streaming response
+        def stream_generator():
+            try:
+                # Run async streaming in sync context
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+                async def async_stream():
+                    async for token_data in vllm_service.generate_streaming_text(
+                            model=model,
+                            prompt=prompt,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            top_p=top_p
+                    ):
+                        # Format as Server-Sent Events
+                        event_data = json.dumps({
+                            'token': token_data.get('token', ''),
+                            'is_final': token_data.get('is_final', False),
+                            'total_tokens': token_data.get('total_tokens', 0),
+                            'model_name': model.name,
+                            'model_id': model.id
+                        })
+                        yield f"data: {event_data}\n\n"
+
+                        if token_data.get('is_final'):
+                            break
+
+                # Run the async generator
+                async_gen = async_stream()
+                try:
+                    while True:
+                        chunk = loop.run_until_complete(async_gen.__anext__())
+                        yield chunk
+                except StopAsyncIteration:
+                    pass
+                finally:
+                    loop.close()
+
+            except Exception as e:
+                print(f"Streaming error: {e}")
+                error_data = json.dumps({'error': str(e)})
+                yield f"data: {error_data}\n\n"
+
+        # Return streaming response
+        response = StreamingHttpResponse(
+            stream_generator(),
+            content_type='text/event-stream'
+        )
+        response['Cache-Control'] = 'no-cache'
+        response['Connection'] = 'keep-alive'
+        response['Access-Control-Allow-Origin'] = '*'
+
+        return response
+
+    except json.JSONDecodeError:
+        return JsonResponse({
+            'error': 'Invalid JSON format'
+        }, status=400)
+    except Exception as e:
+        print(f"Error in streaming endpoint: {e}")
+        return JsonResponse({
+            'error': str(e)
+        }, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def get_active_model_status(request):
+    """Get information about the currently active model"""
+    try:
+        active_model = vllm_service.get_active_model()
+
+        if not active_model:
+            return JsonResponse({
+                'active_model': None,
+                'message': 'No active model found'
+            })
+
+        return JsonResponse({
+            'active_model': {
+                'id': active_model.id,
+                'name': active_model.name,
+                'model_path': active_model.model_path,
+                'status': active_model.status,
+                'memory_usage': active_model.memory_usage,
+                'max_tokens': active_model.max_tokens,
+                'loaded_at': active_model.loaded_at.isoformat() if active_model.loaded_at else None
+            },
+            'server_running': vllm_service.is_server_running(active_model)
+        })
+
+    except Exception as e:
+        print(f"Error getting active model status: {e}")
+        return JsonResponse({
+            'error': str(e)
+        }, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def generate_with_active_model_rag(request):
+    """Generate text using RAG with the currently active model"""
+    try:
+        # Get the currently active model
+        active_model = vllm_service.get_active_model()
+
+        if not active_model:
+            return JsonResponse({
+                'error': 'No active model found. Please load a model first.'
+            }, status=400)
+
+        data = json.loads(request.body)
+
+        document_id = data.get('document_id')
+        if not document_id:
+            return JsonResponse({'error': 'document_id is required'}, status=400)
+
+        # Verify document exists and belongs to the active model
+        try:
+            document = Document.objects.get(id=document_id, model=active_model)
+        except Document.DoesNotExist:
+            return JsonResponse({
+                'error': f'Document with ID {document_id} not found for the active model'
+            }, status=404)
+
+        result = vllm_service.generate_text_with_smart_rag(
+            model=active_model,
+            prompt=data.get('prompt', ''),
+            document_id=document_id,
+            max_tokens=data.get('max_tokens', 100),
+            temperature=data.get('temperature', 0.7),
+            top_p=data.get('top_p', 0.9),
+            strategy=data.get('strategy')
+        )
+
+        # Add active model info to the response
+        result['active_model'] = {
+            'id': active_model.id,
+            'name': active_model.name,
+            'status': active_model.status
+        }
+
+        return JsonResponse(result)
+
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON in request body'}, status=400)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def generate_with_active_model(request):
+    """Generate text using the currently active model (without RAG)"""
+    try:
+        # Get the currently active model
+        active_model = vllm_service.get_active_model()
+
+        if not active_model:
+            return JsonResponse({
+                'error': 'No active model found. Please load a model first.'
+            }, status=400)
+
+        data = json.loads(request.body)
+
+        result = vllm_service.generate_text(
+            model=active_model,
+            prompt=data.get('prompt', ''),
+            max_tokens=data.get('max_tokens', 100),
+            temperature=data.get('temperature', 0.7),
+            top_p=data.get('top_p', 0.9),
+            stop=data.get('stop', [])
+        )
+
+        # Add active model info to the response
+        result['active_model'] = {
+            'id': active_model.id,
+            'name': active_model.name,
+            'status': active_model.status
+        }
+
+        return JsonResponse(result)
+
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON in request body'}, status=400)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@require_http_methods(["GET"])
+def get_active_model_documents(request):
+    """Get all documents for the currently active model"""
+    try:
+        # Get the currently active model
+        active_model = vllm_service.get_active_model()
+
+        if not active_model:
+            return JsonResponse({
+                'error': 'No active model found. Please load a model first.'
+            }, status=400)
+
+        documents = Document.objects.filter(model=active_model).values(
+            'id', 'title', 'filename', 'file_size', 'is_indexed', 'created_at'
+        )
+
+        return JsonResponse({
+            'documents': list(documents),
+            'active_model': {
+                'id': active_model.id,
+                'name': active_model.name,
+                'status': active_model.status
+            }
+        })
+
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@require_http_methods(["GET"])
+def search_active_model_document_chunks(request):
+    """Search document chunks for the currently active model"""
+    try:
+        # Get the currently active model
+        active_model = vllm_service.get_active_model()
+
+        if not active_model:
+            return JsonResponse({
+                'error': 'No active model found. Please load a model first.'
+            }, status=400)
+
+        document_id = request.GET.get('document_id')
+        query = request.GET.get('query', '')
+        k = int(request.GET.get('k', 5))
+
+        if not document_id:
+            return JsonResponse({'error': 'document_id parameter is required'}, status=400)
+
+        if not query:
+            return JsonResponse({'error': 'query parameter is required'}, status=400)
+
+        # Verify document exists and belongs to the active model
+        try:
+            document = Document.objects.get(id=document_id, model=active_model)
+        except Document.DoesNotExist:
+            return JsonResponse({
+                'error': f'Document with ID {document_id} not found for the active model'
+            }, status=404)
+
+        # Search chunks
+        vector_service = DocumentVectorStoreService(active_model)
+        chunks = vector_service.search_document_chunks(document_id, query, k)
+
+        return JsonResponse({
+            'chunks': chunks,
+            'document_title': document.title,
+            'active_model': {
+                'id': active_model.id,
+                'name': active_model.name,
+                'status': active_model.status
+            }
+        })
+
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def add_document_from_file_path(request, model_id):
+    """Add a document from file path and index it in vector store"""
+    try:
+        model = get_object_or_404(LLMModel, id=model_id)
+        data = json.loads(request.body)
+
+        file_path = data.get('file_path', '')
+        if not file_path:
+            return JsonResponse({'error': 'file_path is required'}, status=400)
+
+        # Check if file exists
+        if not os.path.exists(file_path):
+            return JsonResponse({'error': f'File not found: {file_path}'}, status=404)
+
+        # Check if file is readable
+        if not os.access(file_path, os.R_OK):
+            return JsonResponse({'error': f'File not readable: {file_path}'}, status=403)
+
+        # Read file content
+        try:
+            with open(file_path, 'r', encoding='utf-8') as file:
+                content = file.read()
+        except UnicodeDecodeError:
+            # Try with different encoding
+            try:
+                with open(file_path, 'r', encoding='latin-1') as file:
+                    content = file.read()
+            except Exception as e:
+                return JsonResponse({'error': f'Error reading file: {str(e)}'}, status=400)
+        except Exception as e:
+            return JsonResponse({'error': f'Error reading file: {str(e)}'}, status=400)
+
+        # Get file info
+        file_size = os.path.getsize(file_path)
+        filename = os.path.basename(file_path)
+        title = data.get('title', filename)
+
+        # Create document
+        document = Document.objects.create(
+            model=model,
+            title=title,
+            filename=filename,
+            content=content,
+            file_size=file_size,
+            metadata=data.get('metadata', {'source_path': file_path})
+        )
+
+        # Add to vector store
+        vector_service = TokenAwareVectorService(model)
+        success = vector_service.add_document_to_vector_store(
+            document=document,
+            target_chunk_tokens=data.get('chunk_tokens', 300),
+            overlap_tokens=data.get('overlap_tokens', 50)
+        )
+
+        if success:
+            return JsonResponse({
+                'success': True,
+                'document_id': str(document.id),
+                'title': document.title,
+                'filename': document.filename,
+                'file_size': document.file_size,
+                'chunks_created': DocumentChunk.objects.filter(document=document).count(),
+                'message': 'Document added and indexed successfully'
+            })
+        else:
+            # Clean up document if vector store failed
+            document.delete()
+            return JsonResponse({'error': 'Failed to add document to vector store'}, status=500)
+
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON in request body'}, status=400)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def add_document_from_file_path_active_model(request):
+    """Add a document from file path using the active model"""
+    try:
+        # Get the currently active model
+        active_model = vllm_service.get_active_model()
+
+        if not active_model:
+            return JsonResponse({
+                'error': 'No active model found. Please load a model first.'
+            }, status=400)
+
+        data = json.loads(request.body)
+
+        file_path = data.get('file_path', '')
+        if not file_path:
+            return JsonResponse({'error': 'file_path is required'}, status=400)
+
+        # Check if file exists
+        if not os.path.exists(file_path):
+            return JsonResponse({'error': f'File not found: {file_path}'}, status=404)
+
+        # Check if file is readable
+        if not os.access(file_path, os.R_OK):
+            return JsonResponse({'error': f'File not readable: {file_path}'}, status=403)
+
+        # Read file content
+        try:
+            with open(file_path, 'r', encoding='utf-8') as file:
+                content = file.read()
+        except UnicodeDecodeError:
+            # Try with different encoding
+            try:
+                with open(file_path, 'r', encoding='latin-1') as file:
+                    content = file.read()
+            except Exception as e:
+                return JsonResponse({'error': f'Error reading file: {str(e)}'}, status=400)
+        except Exception as e:
+            return JsonResponse({'error': f'Error reading file: {str(e)}'}, status=400)
+
+        # Get file info
+        file_size = os.path.getsize(file_path)
+        filename = os.path.basename(file_path)
+        title = data.get('title', filename)
+
+        # Create document
+        document = Document.objects.create(
+            model=active_model,
+            title=title,
+            filename=filename,
+            content=content,
+            file_size=file_size,
+            metadata=data.get('metadata', {'source_path': file_path})
+        )
+
+        # Add to vector store
+        vector_service = TokenAwareVectorService(active_model)
+        success = vector_service.add_document_to_vector_store(
+            document=document,
+            target_chunk_tokens=data.get('chunk_tokens', 300),
+            overlap_tokens=data.get('overlap_tokens', 50)
+        )
+
+        if success:
+            return JsonResponse({
+                'success': True,
+                'document_id': str(document.id),
+                'title': document.title,
+                'filename': document.filename,
+                'file_size': document.file_size,
+                'chunks_created': DocumentChunk.objects.filter(document=document).count(),
+                'active_model': {
+                    'id': active_model.id,
+                    'name': active_model.name,
+                    'status': active_model.status
+                },
+                'message': 'Document added and indexed successfully'
+            })
+        else:
+            # Clean up document if vector store failed
+            document.delete()
+            return JsonResponse({'error': 'Failed to add document to vector store'}, status=500)
+
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON in request body'}, status=400)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def add_global_document_from_file_path(request):
+    """Add a document from file path to global vector store (no model association)"""
+    try:
+        data = json.loads(request.body)
+
+        file_path = data.get('file_path', '')
+        if not file_path:
+            return JsonResponse({'error': 'file_path is required'}, status=400)
+
+        # Check if file exists
+        if not os.path.exists(file_path):
+            return JsonResponse({'error': f'File not found: {file_path}'}, status=404)
+
+        # Read file content (same logic as before)
+        try:
+            with open(file_path, 'r', encoding='utf-8') as file:
+                content = file.read()
+        except UnicodeDecodeError:
+            try:
+                with open(file_path, 'r', encoding='latin-1') as file:
+                    content = file.read()
+            except Exception as e:
+                return JsonResponse({'error': f'Error reading file: {str(e)}'}, status=400)
+
+        # Get file info
+        file_size = os.path.getsize(file_path)
+        filename = os.path.basename(file_path)
+        title = data.get('title', filename)
+
+        # Create global document (no model association)
+        document = Document.objects.create(
+            model=None,  # Global document
+            title=title,
+            filename=filename,
+            content=content,
+            file_size=file_size,
+            metadata=data.get('metadata', {'source_path': file_path})
+        )
+
+        # Add to global vector store
+        vector_service = TokenAwareVectorService(model=None)  # No model = global
+        success = vector_service.add_document_to_vector_store(
+            document=document,
+            target_chunk_tokens=data.get('chunk_tokens', 300),
+            overlap_tokens=data.get('overlap_tokens', 50)
+        )
+
+        if success:
+            return JsonResponse({
+                'success': True,
+                'document_id': str(document.id),
+                'title': document.title,
+                'filename': document.filename,
+                'file_size': document.file_size,
+                'chunks_created': DocumentChunk.objects.filter(document=document).count(),
+                'is_global': True,
+                'message': 'Global document added successfully'
+            })
+        else:
+            document.delete()
+            return JsonResponse({'error': 'Failed to add document to vector store'}, status=500)
+
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def list_global_documents(request):
+    """List all global documents"""
+    try:
+        documents = Document.objects.filter(model__isnull=True).order_by('-created_at')
+
+        documents_data = []
+        for doc in documents:
+            documents_data.append({
+                'id': str(doc.id),
+                'title': doc.title,
+                'filename': doc.filename,
+                'file_size': doc.file_size,
+                'created_at': doc.created_at.isoformat(),
+                'is_indexed': doc.is_indexed,
+                'chunks_count': doc.chunks.count(),
+                'is_global': True
+            })
+
+        return JsonResponse({
+            'documents': documents_data,
+            'count': len(documents_data)
+        })
+
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)

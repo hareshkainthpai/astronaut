@@ -1,16 +1,16 @@
 import faiss
-import numpy as np
 from sentence_transformers import SentenceTransformer
-from typing import List, Dict, Any, Optional
-import json
+from typing import List, Dict, Optional
 import os
 import hashlib
 from django.conf import settings
+from django.db.models import Q
+
 from llm_dashboard.models import LLMModel, Document, DocumentChunk
 
 
 class DocumentVectorStoreService:
-    def __init__(self, model: LLMModel):
+    def __init__(self, model: Optional[LLMModel] = None):
         self.model = model
         self.embedding_model = None
         self.vector_store = None
@@ -19,7 +19,7 @@ class DocumentVectorStoreService:
 
     def initialize_embedding_model(self):
         """Initialize the embedding model"""
-        if self.model.embedding_model_path:
+        if self.model and self.model.embedding_model_path:
             self.embedding_model = SentenceTransformer(self.model.embedding_model_path)
         else:
             # Default to a good embedding model
@@ -120,11 +120,20 @@ class DocumentVectorStoreService:
                 if not self.vector_store:
                     return []
 
-            # Get document chunks
-            document_chunks = DocumentChunk.objects.filter(
-                document__id=document_id,
-                document__model=self.model
-            ).order_by('chunk_index')
+            # Get document chunks - handle both model-specific and global documents
+            if self.model:
+                # For model-specific service, search both model documents and global documents
+                document_chunks = DocumentChunk.objects.filter(
+                    document__id=document_id
+                ).filter(
+                    models.Q(document__model=self.model) | models.Q(document__model__isnull=True)
+                ).order_by('chunk_index')
+            else:
+                # For global service, only search global documents
+                document_chunks = DocumentChunk.objects.filter(
+                    document__id=document_id,
+                    document__model__isnull=True
+                ).order_by('chunk_index')
 
             if not document_chunks.exists():
                 return []
@@ -136,7 +145,7 @@ class DocumentVectorStoreService:
             query_embedding = self.embedding_model.encode([query])
 
             # Search in vector store
-            distances, indices = self.vector_store.search(query_embedding.astype('float32'), k * 2)  # Get more results to filter
+            distances, indices = self.vector_store.search(query_embedding.astype('float32'), k * 2)
 
             # Filter results to only include chunks from the specified document
             filtered_results = []
@@ -151,7 +160,8 @@ class DocumentVectorStoreService:
                         'document_id': str(chunk.document.id),
                         'document_title': chunk.document.title,
                         'similarity_score': float(1 / (1 + distance)),
-                        'vector_index': idx
+                        'vector_index': idx,
+                        'is_global': chunk.document.is_global
                     })
 
                 if len(filtered_results) >= k:
@@ -166,10 +176,18 @@ class DocumentVectorStoreService:
     def get_document_chunks_by_id(self, document_id: str) -> List[Dict]:
         """Get all chunks for a specific document ordered by chunk_index"""
         try:
-            chunks = DocumentChunk.objects.filter(
-                document__id=document_id,
-                document__model=self.model
-            ).select_related('document').order_by('chunk_index')
+            # Handle both model-specific and global documents
+            if self.model:
+                chunks = DocumentChunk.objects.filter(
+                    document__id=document_id
+                ).filter(
+                    Q(document__model=self.model) | Q(document__model__isnull=True)
+                ).select_related('document').order_by('chunk_index')
+            else:
+                chunks = DocumentChunk.objects.filter(
+                    document__id=document_id,
+                    document__model__isnull=True
+                ).select_related('document').order_by('chunk_index')
 
             return [
                 {
@@ -178,7 +196,8 @@ class DocumentVectorStoreService:
                     'content': chunk.content,
                     'document_id': str(chunk.document.id),
                     'document_title': chunk.document.title,
-                    'vector_index': chunk.vector_index
+                    'vector_index': chunk.vector_index,
+                    'is_global': chunk.document.is_global
                 }
                 for chunk in chunks
             ]
@@ -207,13 +226,19 @@ class DocumentVectorStoreService:
 
     def _get_vector_store_path(self) -> str:
         """Get the path for vector store files"""
-        if self.model.vector_store_path:
-            return self.model.vector_store_path
+        if self.model:
+            # Model-specific path
+            if self.model.vector_store_path:
+                return self.model.vector_store_path
+            else:
+                vector_dir = os.path.join(settings.BASE_DIR, 'vector_stores')
+                os.makedirs(vector_dir, exist_ok=True)
+                return os.path.join(vector_dir, f"model_{self.model.id}")
         else:
-            # Default path
+            # Global vector store path
             vector_dir = os.path.join(settings.BASE_DIR, 'vector_stores')
             os.makedirs(vector_dir, exist_ok=True)
-            return os.path.join(vector_dir, f"model_{self.model.id}")
+            return os.path.join(vector_dir, "global_vector_store")
 
     def _save_vector_store(self):
         """Save vector store to disk"""

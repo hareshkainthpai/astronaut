@@ -25,3 +25,5 @@ numpy==2.2.6
 pillow==11.3.0
 
 flashinfer-python==0.2.7
+
+aiohttp>=3.8.0
