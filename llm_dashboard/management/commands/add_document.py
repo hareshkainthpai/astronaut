@@ -1,9 +1,22 @@
 from django.core.management.base import BaseCommand
 from llm_dashboard.models import LLMModel, Document
-from llm_dashboard.services.token_aware_vector_service import TokenAwareVectorService
 import uuid
 
+from llm_dashboard.services.vector_service.token_aware_vector import TokenAwareVectorService
+
+
 class Command(BaseCommand):
+    """
+    Command to add a document to the vector store.
+
+    This command allows users to upload a document to a vector store by specifying details such as
+    the associated model, document title, content file, and tokenization parameters. It also
+    supports optional configuration for a custom document ID. The command handles file reading,
+    document metadata creation, and communication with the vector store service for proper indexing.
+
+    :ivar help: Short description of what the command does, shown in the help text for the command.
+    :type help: str
+    """
     help = 'Add a document to the vector store'
 
     def add_arguments(self, parser):
@@ -15,6 +28,28 @@ class Command(BaseCommand):
         parser.add_argument('--overlap-tokens', type=int, default=50, help='Overlap tokens between chunks')
 
     def handle(self, *args, **options):
+        """
+        Handles the addition of a document to the system by creating the
+        document, storing its metadata, and pushing the content to a
+        vector store for further processing. This method retrieves an
+        LLM model instance, reads document content from a specified file,
+        and processes the document by using the vector service. The document
+        metadata includes the source file path.
+
+        :param args: Positional arguments. Not used directly.
+        :type args: tuple
+        :param options: Dictionary of options that includes:
+            - model_id (str): ID of the LLM Model to retrieve.
+            - content_file (str): The file containing document content to process.
+            - document_id (optional, str): ID of the document to create. If omitted,
+              it will be automatically generated.
+            - title (str): Title of the document to create.
+            - chunk_tokens (int): Target size in tokens for chunks when adding
+              the document to the vector store.
+            - overlap_tokens (int): Number of overlapping tokens between chunks.
+        :type options: dict
+        :return: None
+        """
         try:
             model = LLMModel.objects.get(id=options['model_id'])
 

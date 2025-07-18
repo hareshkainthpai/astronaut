@@ -5,13 +5,45 @@ from llm_dashboard.services.vector_service.token_aware_vector import TokenAwareV
 
 class MapReduceService:
     def __init__(self, model: 'LLMModel', vllm_service):
+        """
+        Initializes the instance with the specified model and vllm_service. It also
+        sets up a token-aware vector service for the provided model. The primary
+        goal of the constructor is to prepare services and dependencies required
+        for further operations with the class.
+
+        :param model: The LLMModel instance used for language model interactions.
+        :param vllm_service: The service responsible for managing and utilizing
+            the virtual language model.
+        """
         self.model = model
         self.vllm_service = vllm_service
         self.vector_service = TokenAwareVectorService(model)
 
     def process_document_with_map_reduce(self, document_id: str, query: str,
                                          max_tokens: int = None) -> Dict:
-        """Process document using map-reduce approach"""
+        """
+        Processes a document using Map-Reduce strategy for efficient summary
+        generation. The process consists of a 'map' phase where document chunks
+        are summarized individually, followed by a 'reduce' phase to combine
+        the summaries into a final output. This method utilizes vector-based
+        services and LLMs (Large Language Models) to generate factual and
+        context-aware summaries. It ensures that the context tokens do not
+        exceed the maximum token limit specified.
+
+        :param document_id: Identifier of the document to be processed.
+        :type document_id: str
+        :param query: The query or input prompt guiding the summarization or
+                      extraction task.
+        :type query: str
+        :param max_tokens: Optional maximum number of context tokens to use. If
+                           not provided, this is determined dynamically based on
+                           the model's available context tokens.
+        :type max_tokens: int, optional
+        :return: A dictionary containing the map-reduce processing strategy,
+                 intermediate map results, final combined summary, total
+                 batches processed, and the total tokens used during the process.
+        :rtype: Dict
+        """
 
         if max_tokens is None:
             max_tokens = self.model.get_available_context_tokens()
