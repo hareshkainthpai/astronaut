@@ -2,6 +2,20 @@
 
 A Django-based web service for managing and serving Large Language Models (LLMs) using vLLM backend with enhanced CUDA stability and multi-GPU support.
 
+## Dashboard Overview
+
+<img src="images/dashboard.png" alt="Dashboard Screenshot" title="Main Dashboard Interface" width="800" height="600">
+
+## Features
+
+### Model Details
+
+<img src="images/model_details.png" alt="Models Details Screenshot" title="Model Details" width="800" height="600">
+
+### Model Selection
+
+<img src="images/model_select.png" alt="Models Select Screenshot" title="Select MOdel" width="800" height="600">
+
 ## Overview
 
 Astronaut is a comprehensive LLM management platform that provides:
@@ -12,7 +26,6 @@ Astronaut is a comprehensive LLM management platform that provides:
 - **Real-time Monitoring**: Live logs and status tracking for model operations
 - **OpenAI-Compatible API**: Standard API endpoints for text generation
 - **Request Tracking**: Detailed logging of all model requests and responses
-- **Document Vector Store**: Advanced RAG (Retrieval-Augmented Generation) capabilities with intelligent document chunking and vector-based retrieval
 
 ## Features
 
@@ -23,21 +36,12 @@ Astronaut is a comprehensive LLM management platform that provides:
 - **Health Monitoring**: Real-time server health checks and diagnostics
 - **Error Recovery**: Robust error handling and recovery mechanisms
 
-### Document & RAG Features
-- **Smart Document Processing**: Token-aware document chunking with configurable overlap
-- **Vector Store Integration**: FAISS-based vector storage for efficient similarity search
-- **Enhanced RAG Integration**: Reference documents by ID rather than embedding entire context in prompts
-- **Multiple RAG Strategies**: Support for direct retrieval, sliding window, and map-reduce approaches
-- **Document Management**: Full CRUD operations for document lifecycle management
-
 ### Technical Features
 - **CUDA Stability**: Enhanced CUDA environment configuration
 - **Process Management**: Proper process lifecycle management
 - **Memory Optimization**: Advanced GPU memory cleanup and optimization
 - **Concurrent Operations**: Support for multiple simultaneous model operations
 - **Logging System**: Comprehensive logging with real-time updates
-
-The service now supports documents stored in a vector store for enhanced RAG integration, enabling efficient retrieval-augmented generation without the need to include all contextual data directly in prompts. Users can simply reference documents by their unique identifier, allowing the system to intelligently retrieve relevant chunks from the vector store based on semantic similarity. This approach significantly reduces prompt token usage while maintaining high-quality contextual responses, supporting both model-specific and global document collections with advanced chunking strategies and embedding-based retrieval.
 
 ## Models
 
