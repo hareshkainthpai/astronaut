@@ -1,16 +1,15 @@
+import json
 import subprocess
 import time
 import os
-import signal
 import psutil
 import requests
-import json
-from typing import Dict, Any, Optional
+from typing import Dict
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
 
 from .vector_service.token_aware_vector import TokenAwareVectorService
-from ..models import LLMModel, LLMRequest, Document
+from ..models import LLMModel, LLMRequest
 from .map_reduce_service import MapReduceService
 import logging
 
@@ -19,11 +18,32 @@ logger = logging.getLogger(__name__)
 
 class VLLMService:
     def __init__(self):
+        """
+        Manages initialization of process storage and channel layer instance.
+
+        This class is responsible for maintaining a dictionary to store
+        information about processes associated with models. It also initializes
+        a channel layer for handling asynchronous communication between
+        different components.
+
+        Attributes:
+            processes (dict): A dictionary to store process information for each model.
+            channel_layer (ChannelsLayer): A channel layer instance used for communication.
+        """
         self.processes = {}  # Store process info for each model
         self.channel_layer = get_channel_layer()
 
     def _append_log(self, model: LLMModel, message: str):
-        """Append log message to model's loading logs"""
+        """
+        Appends a log entry to the model's loading logs, maintains size constraints on the log,
+        and optionally sends a real-time WebSocket update if available.
+
+        :param model: The LLMModel instance whose logs are being updated.
+        :type model: LLMModel
+        :param message: The log message to append with a timestamp.
+        :type message: str
+        :return: None
+        """
         try:
             timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
             log_entry = f"[{timestamp}] {message}\n"
@@ -52,7 +72,25 @@ class VLLMService:
             logger.error(f"Error appending log: {e}")
 
     def _detect_best_attention_backend(self, model: LLMModel) -> str:
-        """Detect the best available attention backend"""
+        """
+        Detects the best attention backend available for the provided model.
+
+        The function attempts to determine the most appropriate backend for attention
+        operations by trying different modules in the following order:
+        1. XFormers (preferred)
+        2. FlashInfer
+        3. PyTorch SDPA (default fallback)
+
+        The detection is done dynamically, and the selected backend is logged for
+        tracking purposes.
+
+        :param model: The large language model instance used for attention
+            backend detection.
+        :type model: LLMModel
+        :return: A string indicating the detected attention backend. Possible values are
+            'XFORMERS', 'FLASHINFER', and 'TORCH_SDPA'.
+        :rtype: str
+        """
         self._append_log(model, "🔍 Detecting best attention backend...")
 
         # Try XFormers first (preferred)
@@ -76,7 +114,20 @@ class VLLMService:
         return 'TORCH_SDPA'
 
     def _check_cuda_environment(self, model: LLMModel):
-        """Check and configure CUDA environment"""
+        """
+        Checks the CUDA environment and configures relevant settings for optimal GPU utilization.
+
+        This method verifies the presence of CUDA devices and automatically configures system
+        and library-wide environment variables to enhance the stability and performance of
+        CUDA-based computations. It also identifies and sets the best attention backend
+        (e.g., XFormers) if applicable. Logs are appended throughout the process to track
+        progress. Returns whether the CUDA environment check was successful or failed.
+
+        :param model: An instance of `LLMModel` containing parameters and configurations
+            required for the CUDA setup.
+        :return: A boolean value indicating whether the CUDA environment initialization
+            was successful (True) or encountered an error (False).
+        """
         self._append_log(model, "🔧 Checking CUDA environment...")
 
         try:
@@ -117,7 +168,19 @@ class VLLMService:
             return False
 
     def _build_vllm_command(self, model: LLMModel) -> list:
-        """Build vLLM command with optimized settings"""
+        """
+        Builds the command to execute the vLLM server with specified parameters of the
+        provided LLMModel instance. The command includes details about the model path,
+        network configuration, tensor parallelization, and GPU memory utilization.
+        Additional optimizations for the XFormers attention backend are included if
+        enabled via environment settings.
+
+        :param model: The LLMModel instance containing all configurations for the vLLM
+                      server execution.
+        :type model: LLMModel
+        :return: A list of strings representing the command to start the vLLM server.
+        :rtype: list
+        """
         cmd = [
             'python', '-m', 'vllm.entrypoints.openai.api_server',
             '--model', model.model_path,
@@ -143,13 +206,30 @@ class VLLMService:
         return cmd
 
     def start_vllm_server(self, model: LLMModel):
-        """Start vLLM server for the given model"""
+        """
+        Starts the vLLM server for the given model and manages its life cycle. This
+        includes checking server status, cleaning up GPU memory, building and
+        executing the vLLM command, monitoring server output, and ensuring readiness.
+
+        :param model: The LLMModel object representing the model for which the vLLM
+            server will be started.
+        :type model: LLMModel
+        :return: True if the server starts successfully and becomes ready, otherwise
+            False.
+        :rtype: bool
+        :raises Exception: Captures and logs any exception that occurs during the
+            process, and updates the model status to 'ERROR'.
+        """
         try:
             self._append_log(model, f"🚀 Starting vLLM server for {model.name}")
 
             # Check if already running
             if self.is_server_running(model):
                 self._append_log(model, "⚠️ Server already running")
+                # Update memory usage even if already running
+                model.memory_usage = self._calculate_gpu_memory_usage(model)
+                model.status = 'LOADED'
+                model.save()
                 return True
 
             # Update model status
@@ -196,13 +276,23 @@ class VLLMService:
             self._append_log(model, f"🔄 Process started with PID: {process.pid}")
 
             # Monitor process output in background
-            self._monitor_process_output(model, process)
+            import threading
+            monitor_thread = threading.Thread(
+                target=self._monitor_process_output,
+                args=(model, process)
+            )
+            monitor_thread.daemon = True
+            monitor_thread.start()
 
             # Wait for server to be ready
             if self._wait_for_server_ready(model):
+                # Calculate and update memory usage
+                memory_usage = self._calculate_gpu_memory_usage(model)
+                model.memory_usage = memory_usage
                 model.status = 'LOADED'
                 model.save()
-                self._append_log(model, "✅ Server is ready and responding!")
+
+                self._append_log(model, f"✅ Server ready! Memory usage: {memory_usage:.2f} GB")
                 return True
             else:
                 model.status = 'ERROR'
@@ -216,7 +306,16 @@ class VLLMService:
             return False
 
     def _monitor_process_output(self, model: LLMModel, process):
-        """Monitor process output and log it"""
+        """
+        Monitors the output of a provided process and appends it to a log. This function listens to the
+        `stdout` stream of the given process line by line until the process is terminated. Any errors
+        encountered during monitoring are appended to the log as well.
+
+        :param model: The LLMModel to associate the monitored output with.
+        :type model: LLMModel
+        :param process: The process whose output is to be monitored.
+        :return: None
+        """
         try:
             while True:
                 output = process.stdout.readline()
@@ -229,7 +328,19 @@ class VLLMService:
             self._append_log(model, f"Error monitoring process: {e}")
 
     def _wait_for_server_ready(self, model: LLMModel, timeout: int = 300):
-        """Wait for vLLM server to be ready"""
+        """
+        Waits for the server to be ready for the specified model within the given timeout period.
+
+        This method continuously checks if the server associated with the given model is ready by
+        querying its health endpoint. If the server becomes ready within the given timeout period,
+        the model's status is updated to 'LOADED' and the method returns True. Otherwise, it logs
+        that the server did not become ready and returns False.
+
+        :param model: The LLMModel instance representing the model for which the server readiness is to be checked.
+        :param timeout: An optional integer specifying the maximum time in seconds to wait for the server
+            to become ready. Defaults to 300.
+        :return: A boolean indicating whether the server became ready within the timeout period.
+        """
         self._append_log(model, "⏳ Waiting for server to be ready...")
 
         start_time = time.time()
@@ -237,6 +348,9 @@ class VLLMService:
             try:
                 response = requests.get(f'http://localhost:{model.vllm_port}/health', timeout=5)
                 if response.status_code == 200:
+                    # Update model status immediately when server is ready
+                    model.status = 'LOADED'
+                    model.save()
                     return True
             except:
                 pass
@@ -248,8 +362,50 @@ class VLLMService:
         self._append_log(model, "❌ Server did not become ready within timeout")
         return False
 
+    def _calculate_gpu_memory_usage(self, model: LLMModel) -> float:
+        """
+        Calculates GPU memory usage across multiple devices up to the model's tensor
+        parallel size. Utilizes the NVIDIA Management Library (NVML) to retrieve memory
+        usage information. If any error occurs during the calculation, a warning log is
+        appended, and a value of 0.0 is returned.
+
+        :param model: The language model object containing tensor parallel size.
+        :type model: LLMModel
+        :return: The total GPU memory usage in gigabytes. Returns 0.0 if the calculation
+            fails due to an exception.
+        :rtype: float
+        """
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+
+            total_memory_used = 0
+            device_count = pynvml.nvmlDeviceGetCount()
+
+            for i in range(min(device_count, model.tensor_parallel_size)):
+                handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                total_memory_used += info.used
+
+            # Convert to GB
+            return total_memory_used / (1024 ** 3)
+        except Exception as e:
+            self._append_log(model, f"Warning: Could not calculate memory usage: {e}")
+            return 0.0
+
     def stop_vllm_server(self, model: LLMModel):
-        """Stop vLLM server for the given model"""
+        """
+        Stops the vLLM server associated with the provided model instance. This method
+        attempts a graceful shutdown of the model's associated process, falling back to
+        a forced termination if necessary. It also performs cleanup actions including
+        removal of process information and GPU memory cleanup, and updates the model's
+        status and persistent storage.
+
+        :param model: The LLMModel instance for which the vLLM server needs to be stopped.
+        :type model: LLMModel
+        :return: Boolean flag indicating whether the vLLM server was stopped successfully.
+        :rtype: bool
+        """
         try:
             self._append_log(model, f"🛑 Stopping vLLM server for {model.name}")
 
@@ -291,7 +447,15 @@ class VLLMService:
             return False
 
     def _force_gpu_memory_cleanup(self):
-        """Force cleanup of GPU memory and processes"""
+        """
+        Attempts to free GPU memory by performing several cleanup operations.
+
+        This method is used to ensure GPU resources are released, especially after
+        running processes that utilize the GPU. It tries to stop any active processes
+        associated with `vllm` and clears the GPU memory cache if possible.
+
+        :return: None
+        """
         try:
             # Kill any vLLM processes
             for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
@@ -315,7 +479,19 @@ class VLLMService:
             logger.error(f"Error in force cleanup: {e}")
 
     def stop_loading(self, model: LLMModel):
-        """Stop loading process"""
+        """
+        Stops the loading process of a given model by terminating its associated process
+        if it is still running. If termination is unsuccessful within a timeout period,
+        it forcefully kills the process. Updates the model's status to reflect the unloading
+        operation and logs the action. Returns a boolean indicating the success of the
+        operation.
+
+        :param model: The LLMModel object whose loading process is to be stopped.
+        :type model: LLMModel
+        :return: A boolean value indicating whether the loading process was successfully
+                 stopped. Returns False if an exception occurred during the process.
+        :rtype: bool
+        """
         try:
             if model.loading_pid:
                 import psutil
@@ -345,7 +521,23 @@ class VLLMService:
             return False
 
     def is_server_running(self, model: LLMModel) -> bool:
-        """Check if vLLM server is running and responding"""
+        """
+        Checks if the server corresponding to the provided model is running by
+        sending a health check request.
+
+        This function makes an HTTP GET request to the health endpoint of the
+        server using the `vllm_port` specified in the model. If the request
+        is successful and the server responds with a status code 200, the server
+        is considered to be running. In case of an exception or a different
+        response code, the server is considered not running.
+
+        :param model: The LLMModel instance, representing the model whose
+            server's status is to be checked.
+        :type model: LLMModel
+        :return: True if the server is running (responds with status code 200),
+            otherwise False.
+        :rtype: bool
+        """
         try:
             response = requests.get(f'http://localhost:{model.vllm_port}/health', timeout=5)
             return response.status_code == 200
@@ -354,7 +546,35 @@ class VLLMService:
 
     def generate_text(self, model: LLMModel, prompt: str, max_tokens: int = 100,
                       temperature: float = 0.7, top_p: float = 0.9) -> Dict:
-        """Generate text using the loaded model"""
+        """
+        Generates text using the specified large language model and prompt. This method
+        prepares and sends a request to the language model server, waits for a
+        response, and processes the returned data. The method can handle various
+        configurable parameters for text generation, such as maximum tokens,
+        temperature, and nucleus sampling probability.
+
+        Raises an exception if the model server is not running or if the API response
+        indicates a failure.
+
+        :param model: The language model instance that provides details like the
+                      model path and server port.
+        :type model: LLMModel
+        :param prompt: The text prompt for generating a continuation.
+        :type prompt: str
+        :param max_tokens: The maximum number of tokens that can be generated.
+                           Defaults to 100.
+        :type max_tokens: int
+        :param temperature: The sampling temperature, controlling creativity in
+                            generation. Defaults to 0.7.
+        :type temperature: float
+        :param top_p: The cumulative probability threshold for nucleus (top-p)
+                      sampling. Defaults to 0.9.
+        :type top_p: float
+        :return: A dictionary containing the generated text, the number
+                 of tokens used in the prompt and generation, and the
+                 generation duration.
+        :rtype: Dict
+        """
         try:
             if not self.is_server_running(model):
                 raise Exception("Model server is not running")
@@ -400,11 +620,162 @@ class VLLMService:
             logger.error(f"Error generating text: {e}")
             raise
 
+    def get_active_model(self):
+        """
+        Get the currently active and running model.
+
+        This method retrieves the model that is marked as 'LOADED' in the database.
+        It ensures that the model's server is running before returning it. If no
+        model is loaded or the server is not operational, it returns None instead.
+
+        :return: The active model if found and running, otherwise None.
+        :rtype: Optional[LLMModel]
+        """
+        try:
+            # Find the model that is currently loaded
+            active_model = LLMModel.objects.filter(status='LOADED').first()
+
+            if active_model and self.is_server_running(active_model):
+                return active_model
+
+            # If no loaded model found or server not running, return None
+            return None
+        except Exception as e:
+            logger.error(f"Error getting active model: {e}")
+            return None
+
+    async def generate_streaming_text(self, model: LLMModel, prompt: str, max_tokens: int = 100,
+                                      temperature: float = 0.7, top_p: float = 0.9):
+        """
+        Generates streaming text completions based on the provided model and prompt.
+
+        This method performs a streaming request to the model server to generate
+        text tokens incrementally in response to the specified input prompt. It
+        uses Server-Sent Events (SSE) to stream tokens, allowing for real-time
+        text generation.
+
+        :param model: The language model instance to use for text generation.
+                      The model must have its server running and accessible.
+        :param prompt: The input text to base the text generation on.
+                       This is the starting point for generating responses.
+        :param max_tokens: The maximum number of tokens to generate in the response.
+                           Defaults to 100.
+        :param temperature: Controls the randomness of the text generation.
+                            Lower values make the response more deterministic,
+                            while higher values introduce more randomness.
+                            Defaults to 0.7.
+        :param top_p: Implements nucleus sampling, where the model considers the
+                      smallest set of tokens whose cumulative probability exceeds
+                      the `top_p` threshold. Defaults to 0.9.
+
+        :return: A streaming generator producing dictionaries with the following keys:
+                 - `token`: The generated text token.
+                 - `is_final`: A boolean indicating whether the end of the stream
+                   is reached.
+                 - `total_tokens`: The cumulative count of tokens generated so far.
+
+        :raises Exception: If the model server is not running or the streaming
+                           request fails, an exception is raised.
+        """
+        try:
+            if not self.is_server_running(model):
+                raise Exception("Model server is not running")
+
+            # Prepare request for streaming
+            data = {
+                "model": model.model_path,
+                "prompt": prompt,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "top_p": top_p,
+                "stream": True,  # Enable streaming
+                "stop": None
+            }
+
+            # Make streaming request
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                        f'http://localhost:{model.vllm_port}/v1/completions',
+                        json=data,
+                        timeout=aiohttp.ClientTimeout(total=300)
+                ) as response:
+
+                    if response.status != 200:
+                        raise Exception(f"API request failed: {response.status}")
+
+                    total_tokens = 0
+                    async for line in response.content:
+                        line = line.decode('utf-8').strip()
+
+                        # Skip empty lines and non-data lines
+                        if not line or not line.startswith('data: '):
+                            continue
+
+                        # Parse SSE data
+                        data_content = line[6:]  # Remove 'data: ' prefix
+
+                        # Check for end of stream
+                        if data_content == '[DONE]':
+                            yield {
+                                'token': '',
+                                'is_final': True,
+                                'total_tokens': total_tokens
+                            }
+                            break
+
+                        try:
+                            # Parse JSON data
+                            token_data = json.loads(data_content)
+
+                            # Extract token from response
+                            choices = token_data.get('choices', [])
+                            if choices:
+                                token = choices[0].get('text', '')
+                                total_tokens += 1
+
+                                yield {
+                                    'token': token,
+                                    'is_final': False,
+                                    'total_tokens': total_tokens
+                                }
+
+                        except json.JSONDecodeError:
+                            # Skip malformed JSON
+                            continue
+
+        except Exception as e:
+            logger.error(f"Error in streaming generation: {e}")
+            raise
+
     def generate_text_with_smart_rag(self, model: LLMModel, prompt: str,
                                      document_id: str, max_tokens: int = 100,
                                      temperature: float = 0.7, top_p: float = 0.9,
                                      strategy: str = None) -> Dict:
-        """Generate text using smart RAG with token management"""
+        """
+        Generates text using Smart RAG (Retrieve-and-Generate) approach. The function utilizes different
+        retrieval and response generation strategies including map-reduce and standard methods.
+
+        :param model:
+            The language model object used for text generation.
+        :param prompt:
+            The textual input prompt used for context generation or response generation.
+        :param document_id:
+            The identifier of the document to retrieve context from.
+        :param max_tokens:
+            The maximum number of tokens to generate in the final response.
+        :param temperature:
+            Parameter to control randomness in the output; higher values generate more diverse responses.
+        :param top_p:
+            Parameter for nucleus sampling that determines the probability mass for considering tokens.
+        :param strategy:
+            Specifies the RAG strategy to use, such as 'map_reduce' or other pre-defined strategies.
+            If not specified, the model's default strategy is used.
+
+        :return:
+            A dictionary containing the generated response, strategy used, context information, number
+            of tokens generated, total context tokens used, and request ID for tracking.
+        """
 
         # Determine strategy
         if strategy is None:
@@ -497,7 +868,26 @@ class VLLMService:
 
     def _process_standard_rag(self, model: LLMModel, document_id: str,
                               query: str, max_tokens: int, strategy: str) -> Dict:
-        """Process standard RAG (sliding window, hybrid, direct)"""
+        """
+        Processes a query using the standard RAG (retrieval-augmented generation) approach
+        by retrieving relevant chunks from a document within the specified token limit.
+
+        This method uses a token-aware vector service to fetch document chunks that fit
+        the token length constraints, ensuring efficient query processing.
+
+        :param model: The language model to be used for processing.
+        :type model: LLMModel
+        :param document_id: The unique identifier for the document to be queried.
+        :type document_id: str
+        :param query: The input query to retrieve relevant information from the document.
+        :type query: str
+        :param max_tokens: The maximum number of tokens allowed for the query response.
+        :type max_tokens: int
+        :param strategy: The retrieval strategy to apply when fetching document chunks.
+        :type strategy: str
+        :return: A dictionary containing the retrieved document chunks within the token limit.
+        :rtype: Dict
+        """
 
         vector_service = TokenAwareVectorService(model)
 
@@ -510,7 +900,23 @@ class VLLMService:
 
     def _process_map_reduce_rag(self, model: LLMModel, document_id: str,
                                 query: str, max_tokens: int) -> Dict:
-        """Process map-reduce RAG"""
+        """
+        Processes a given document using the Map-Reduce approach with the provided query
+        and language model. This method initializes a MapReduceService instance with
+        the provided language model and uses it to process the document specified
+        by its identifier.
+
+        :param model: The language model instance to use for processing.
+        :type model: LLMModel
+        :param document_id: The identifier of the document to process.
+        :type document_id: str
+        :param query: The query to execute for processing the document.
+        :type query: str
+        :param max_tokens: The maximum number of tokens allowed during document processing.
+        :type max_tokens: int
+        :return: A dictionary containing the processed output as per the Map-Reduce approach.
+        :rtype: Dict
+        """
 
         map_reduce_service = MapReduceService(model, self)
 
@@ -521,7 +927,25 @@ class VLLMService:
         )
 
     def _build_enhanced_prompt(self, original_prompt: str, context_result: Dict) -> str:
-        """Build enhanced prompt with context"""
+        """
+        Constructs an enhanced prompt string by incorporating context information from
+        the provided context result. It first determines the strategy for processing the
+        context (e.g., map-reduce or chunk). For the map-reduce strategy, summaries are
+        utilized as context information. For other strategies, chunks of content are
+        used. The method formats the context appropriately and appends it to the original
+        prompt.
+
+        :param original_prompt: The original prompt/question provided by the user.
+        :type original_prompt: str
+        :param context_result: A dictionary containing context information, which may
+            include strategy type, summaries, or content chunks. The structure of this
+            dictionary determines how the context is processed and incorporated into
+            the enhanced prompt.
+        :type context_result: Dict
+        :return: A formatted prompt string that includes the original question and any
+            relevant context extracted from the context result.
+        :rtype: str
+        """
 
         if context_result.get('strategy') == 'map_reduce':
             # For map-reduce, use summaries
