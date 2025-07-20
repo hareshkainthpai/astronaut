@@ -27,6 +27,32 @@ Astronaut is a comprehensive LLM management platform that provides:
 - **OpenAI-Compatible API**: Standard API endpoints for text generation
 - **Request Tracking**: Detailed logging of all model requests and responses
 
+
+## How to start the service (developer)
+
+### Option 1: Complete clean restart
+make force-restart
+
+or 
+
+make setup
+
+### Option 2: Kill everything first, then build
+make kill-all
+make docker-build
+
+### Option 3: Just kill containers and restart
+make kill-docker
+make docker-build
+
+### ## For development (non-Docker) 
+
+#### Kill ports and start development server
+make kill-ports
+make dev-start
+
+
+
 ## Features
 
 ### Core Capabilities
@@ -152,6 +178,7 @@ result = vllm_service.generate_text(
     max_tokens=100
 )
 ```
+
 
 ## License
 
